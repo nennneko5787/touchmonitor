@@ -23,10 +23,7 @@ final class StreamSurfaceView: UIView {
     private var touchMap: [ObjectIdentifier: (id: UInt8, point: CGPoint)] = [:]
     private var nextTouchID: UInt8 = 0
     private var touchLock = NSLock()
-
-    // Visual touch markers, so the user can see on the iPad whether the surface
-    // is actually receiving touches (no NSLog/console available in LiveContainer).
-    private var dotViews: [ObjectIdentifier: UIView] = [:]
+    private let screenScale = UIScreen.main.scale
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -67,7 +64,6 @@ final class StreamSurfaceView: UIView {
             nextTouchID = nextTouchID &+ 1
             let loc = touch.location(in: self)
             let point = normalized(touch, in: bounds)
-            addDot(for: touch, at: loc)
             touchLock.lock()
             touchMap[ObjectIdentifier(touch)] = (id, point)
             touchLock.unlock()
@@ -79,7 +75,6 @@ final class StreamSurfaceView: UIView {
         var changed = false
         for touch in touches {
             let point = normalized(touch, in: bounds)
-            moveDot(for: touch, to: touch.location(in: self))
             touchLock.lock()
             if var stored = touchMap[ObjectIdentifier(touch)] {
                 stored.point = point
@@ -94,7 +89,6 @@ final class StreamSurfaceView: UIView {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             let point = normalized(touch, in: bounds)
-            removeDot(for: touch)
             touchLock.lock()
             if let stored = touchMap.removeValue(forKey: ObjectIdentifier(touch)) {
                 touchLock.unlock()
@@ -109,33 +103,7 @@ final class StreamSurfaceView: UIView {
         touchesEnded(touches, with: event)
     }
 
-    // MARK: - Visual touch markers (diagnostic)
-
-    private func addDot(for touch: UITouch, at point: CGPoint) {
-        let dot = UIView(frame: CGRect(x: 0, y: 0, width: 36, height: 36))
-        dot.center = point
-        dot.layer.cornerRadius = 18
-        dot.backgroundColor = UIColor.systemRed.withAlphaComponent(0.7)
-        dot.layer.borderColor = UIColor.white.cgColor
-        dot.layer.borderWidth = 2
-        dot.isUserInteractionEnabled = false
-        dotViews[ObjectIdentifier(touch)] = dot
-        if isOnScreen(point) {
-            addSubview(dot)
-        }
-    }
-
-    private func moveDot(for touch: UITouch, to point: CGPoint) {
-        dotViews[ObjectIdentifier(touch)]?.center = point
-    }
-
-    private func removeDot(for touch: UITouch) {
-        dotViews.removeValue(forKey: ObjectIdentifier(touch))?.removeFromSuperview()
-    }
-
-    private func isOnScreen(_ point: CGPoint) -> Bool {
-        bounds.contains(point)
-    }
+    
 
     private func emitBatch() {
         touchLock.lock()
@@ -159,14 +127,16 @@ final class StreamSurfaceView: UIView {
         return normalizedPoint(loc, bounds: bounds, video: videoSize)
     }
 
-    private func normalizedPoint(_ point: CGPoint, bounds: CGRect, video: CGSize) -> CGPoint {
+private func normalizedPoint(_ point: CGPoint, bounds: CGRect, video: CGSize) -> CGPoint {
         guard video.width > 0, video.height > 0 else {
             return CGPoint(x: Double(point.x) / Double(bounds.width),
                            y: Double(point.y) / Double(bounds.height))
         }
-        let scale = min(bounds.width / video.width, bounds.height / video.height)
-        let dw = video.width * scale
-        let dh = video.height * scale
+        // Convert video size from pixels to points using the screen scale.
+        let videoSizeInPoints = CGSize(width: video.width / screenScale, height: video.height / screenScale)
+        let scale = min(bounds.width / videoSizeInPoints.width, bounds.height / videoSizeInPoints.height)
+        let dw = videoSizeInPoints.width * scale
+        let dh = videoSizeInPoints.height * scale
         let ox = (bounds.width - dw) / 2
         let oy = (bounds.height - dh) / 2
         let desktopRect = CGRect(x: ox, y: oy, width: dw, height: dh)

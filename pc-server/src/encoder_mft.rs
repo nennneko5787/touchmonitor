@@ -14,6 +14,8 @@ use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 
+const LOG_ENABLED: bool = false; // Set to true to enable verbose logging
+
 pub struct MftEncoder {
     transform: Option<IMFTransform>,
     event_gen: Option<IMFMediaEventGenerator>,
@@ -35,13 +37,15 @@ fn mf_runtime_init() -> bool {
     static INIT: OnceLock<bool> = OnceLock::new();
     *INIT.get_or_init(|| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        match MFStartup(MF_VERSION, MFSTARTUP_FULL) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("[MFT] MFStartup failed: {e}");
-                false
-            }
-        }
+match MFStartup(MF_VERSION, MFSTARTUP_FULL) {
+             Ok(()) => true,
+             Err(e) => {
+                 if LOG_ENABLED {
+                     eprintln!("[MFT] MFStartup failed: {e}");
+                 }
+                 false
+             }
+         }
     })
 }
 
@@ -188,21 +192,25 @@ impl MftEncoder {
             return Err("Media Foundation runtime init failed".into());
         }
 
-        let activate = match enumerate_hw_h264_encoders() {
-            Ok(hw) if !hw.is_empty() => {
-                eprintln!("[MFT] using hardware H.264 encoder");
-                hw.into_iter().next().unwrap()
-            }
-            _ => {
-                let sw = enumerate_sw_h264_encoders()
-                    .map_err(|e| format!("enumerate SW encoders: {e}"))?;
-                if sw.is_empty() {
-                    return Err("no H.264 encoder MFT found".into());
-                }
-                eprintln!("[MFT] using software H.264 encoder");
-                sw.into_iter().next().unwrap()
-            }
-        };
+let activate = match enumerate_hw_h264_encoders() {
+             Ok(hw) if !hw.is_empty() => {
+                 if LOG_ENABLED {
+                     eprintln!("[MFT] using hardware H.264 encoder");
+                 }
+                 hw.into_iter().next().unwrap()
+             }
+             _ => {
+                 let sw = enumerate_sw_h264_encoders()
+                     .map_err(|e| format!("enumerate SW encoders: {e}"))?;
+                 if sw.is_empty() {
+                     return Err("no H.264 encoder MFT found".into());
+                 }
+                 if LOG_ENABLED {
+                     eprintln!("[MFT] using software H.264 encoder");
+                 }
+                 sw.into_iter().next().unwrap()
+             }
+         };
 
         let transform: IMFTransform = unsafe {
             activate
