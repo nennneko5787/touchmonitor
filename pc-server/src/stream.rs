@@ -86,10 +86,9 @@ fn handle_client(
         bounds.width, bounds.height, bounds.left, bounds.top
     );
 
-    let mut encoder = {
-        eprintln!("[stream] forcing software OpenH264 encoder for testing");
-        Encoder::OpenH264(H264Encoder::new(bounds.width as usize, bounds.height as usize, fps, bitrate_kbps)?)
-    };
+let mut encoder = {
+         Encoder::Mft(MftEncoder::new(bounds.width as u32, bounds.height as u32, fps, bitrate_kbps)?)
+     };
     let mapping = ScreenMapping {
         width: bounds.width,
         height: bounds.height,
