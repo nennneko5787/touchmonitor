@@ -259,7 +259,30 @@ impl TouchInjector {
             let ok = unsafe { (api.inject)(contacts.len() as u32, contacts.as_ptr()) };
             if ok == 0 {
                 let err = unsafe { GetLastError() };
-                eprintln!("touch inject error: SendFailed lastErr={err}");
+                eprintln!(
+                    "touch inject error: SendFailed lastErr={err} origin=({},{}) size={}x{} ptr_info_size={} ptr_touch_size={} n={}",
+                    mapping.origin_x,
+                    mapping.origin_y,
+                    mapping.width,
+                    mapping.height,
+                    std::mem::size_of::<PointerInfo>(),
+                    std::mem::size_of::<PointerTouchInfo>(),
+                    contacts.len()
+                );
+                for c in &contacts {
+                    let p = &c.pointer_info;
+                    eprintln!(
+                        "  contact id={} flags=0x{:08X} pt=({},{}) rc=({},{},{},{})",
+                        p.pointer_id,
+                        p.pointer_flags,
+                        p.pt_pixel_location.x,
+                        p.pt_pixel_location.y,
+                        c.rc_contact.left,
+                        c.rc_contact.top,
+                        c.rc_contact.right,
+                        c.rc_contact.bottom
+                    );
+                }
                 return Err(TouchError::SendFailed);
             }
         }
