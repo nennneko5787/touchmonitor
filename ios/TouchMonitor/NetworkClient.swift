@@ -28,6 +28,10 @@ class NetworkClient {
     private let connection: NWConnection
     private let decoder: H264Decoder
 
+    /// Periodic keep-alive so the PC server can see the client->server path is
+    /// alive even when the user isn't touching (helps diagnose touch drops).
+    private var pingTimer: Timer?
+
     /// All reads/writes of `readBuffer` happen on `sendQueue` (the connection's
     /// receive queue), so it is accessed serially.
     private var readBuffer = Data()
@@ -47,6 +51,7 @@ class NetworkClient {
             switch newState {
             case .ready:
                 self.state = .connected
+                self.startPingTimer()
                 self.receiveLoop()
             case .failed(let error):
                 self.state = .failed(error.localizedDescription)
@@ -62,6 +67,7 @@ class NetworkClient {
     }
 
     func stop() {
+        stopPingTimer()
         connection.cancel()
         state = .disconnected
     }
@@ -141,9 +147,22 @@ class NetworkClient {
 
     /// Sends a keep-alive ping.
     func sendPing() {
-        if case .connected = state {
-            let ping = StreamProtocol.frame(type: .ping, payload: Data())
-            connection.send(content: ping, completion: .contentProcessed { _ in })
+        guard case .connected = state else { return }
+        let ping = StreamProtocol.frame(type: .ping, payload: Data())
+        connection.send(content: ping, completion: .contentProcessed { _ in })
+    }
+
+    private func startPingTimer() {
+        stopPingTimer()
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.sendPing()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pingTimer = timer
+    }
+
+    private func stopPingTimer() {
+        pingTimer?.invalidate()
+        pingTimer = nil
     }
 }
