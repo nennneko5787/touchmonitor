@@ -310,6 +310,7 @@ impl MftEncoder {
     }
 
     pub fn encode_frame(&mut self, bgra: &[u8]) -> Result<EncodedFrame, Box<dyn std::error::Error>> {
+        eprintln!("[MFT] encode_frame called");
         let transform = self
             .transform
             .as_ref()
@@ -321,9 +322,12 @@ impl MftEncoder {
 
         // Convert BGRA -> NV12
         let (y_plane, uv_plane) = bgra_to_nv12(bgra, self.width as usize, self.height as usize);
+        eprintln!("[MFT] BGRA->NV12 conversion done");
 
         // --- 1. Wait for METransformNeedInput (blocking) ---
+        eprintln!("[MFT] waiting for METransformNeedInput");
         wait_for_event(event_gen, METransformNeedInput.0)?;
+        eprintln!("[MFT] got METransformNeedInput");
 
         // --- 2. Create input sample ---
         let input_sample = unsafe {
@@ -338,18 +342,22 @@ impl MftEncoder {
             sample.AddBuffer(&uv_buf)?;
             sample
         };
+        eprintln!("[MFT] input sample created");
 
         // --- 3. ProcessInput ---
+        eprintln!("[MFT] calling ProcessInput");
         unsafe {
             transform
                 .ProcessInput(self.input_stream_id, &input_sample, 0)
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
+        eprintln!("[MFT] ProcessInput succeeded");
 
         // --- 4. Drain ALL available output (may be multiple frames) ---
         let mut all_data = Vec::new();
         let mut got_keyframe = false;
 
+        eprintln!("[MFT] entering output drain loop");
         loop {
             // Non-blocking poll for METransformHaveOutput
             let event = unsafe {
@@ -362,6 +370,7 @@ impl MftEncoder {
             let event_type = unsafe { event.GetType().unwrap_or(0) };
 
             if event_type as i32 == METransformHaveOutput.0 {
+                eprintln!("[MFT] got METransformHaveOutput event");
                 // Process output
                 let output_sample = unsafe {
                     let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
@@ -387,6 +396,7 @@ impl MftEncoder {
                     )
                 } {
                     Ok(()) => {
+                        eprintln!("[MFT] ProcessOutput succeeded");
                         let sample_opt: Option<IMFSample> =
                             unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
                         if let Some(sample) = sample_opt {
@@ -395,17 +405,25 @@ impl MftEncoder {
                             };
                             if flags == 1 {
                                 got_keyframe = true;
+                                eprintln!("[MFT] output frame is keyframe");
+                            } else {
+                                eprintln!("[MFT] output frame is not keyframe (flags={})", flags);
                             }
                             match unsafe { read_sample_data(&sample) } {
-                                Ok(data) => all_data.extend_from_slice(&data),
+                                Ok(data) => {
+                                    eprintln!("[MFT] read {} bytes from output sample", data.len());
+                                    all_data.extend_from_slice(&data);
+                                }
                                 Err(e) => eprintln!("[MFT] read_sample: {e}"),
                             }
                         }
                     }
                     Err(hr) => {
                         if hr.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
+                            eprintln!("[MFT] ProcessOutput returned MF_E_TRANSFORM_NEED_MORE_INPUT");
                             break;
                         }
+                        eprintln!("[MFT] ProcessOutput failed with hr={:x}", hr.code().0);
                         break;
                     }
                 }
@@ -414,14 +432,18 @@ impl MftEncoder {
                     unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
                 drop(events);
             } else {
+                eprintln!("[MFT] non-HaveOutput event type={}, breaking", event_type);
                 // Not a HaveOutput event; requeue logic not needed as we're polling
                 break;
             }
         }
+        eprintln!("[MFT] exited output drain loop, got {} bytes", all_data.len());
 
         // If no output this frame, wait for the next HaveOutput event and process it
         if all_data.is_empty() {
+            eprintln!("[MFT] no output yet, waiting for METransformHaveOutput");
             wait_for_event(event_gen, METransformHaveOutput.0)?;
+            eprintln!("[MFT] got METransformHaveOutput after wait");
 
             let output_sample = unsafe {
                 let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
@@ -447,6 +469,7 @@ impl MftEncoder {
                 )
             } {
                 Ok(()) => {
+                    eprintln!("[MFT] ProcessOutput (fallback) succeeded");
                     let sample_opt: Option<IMFSample> =
                         unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
                     if let Some(sample) = sample_opt {
@@ -455,10 +478,16 @@ impl MftEncoder {
                         };
                         if flags == 1 {
                             got_keyframe = true;
+                            eprintln!("[MFT] fallback output frame is keyframe");
+                        } else {
+                            eprintln!("[MFT] fallback output frame is not keyframe (flags={})", flags);
                         }
                         match unsafe { read_sample_data(&sample) } {
-                            Ok(data) => all_data.extend_from_slice(&data),
-                            Err(e) => eprintln!("[MFT] read_sample: {e}"),
+                            Ok(data) => {
+                                eprintln!("[MFT] read {} bytes from fallback output sample", data.len());
+                                all_data.extend_from_slice(&data);
+                            }
+                            Err(e) => eprintln!("[MFT] read_sample fallback: {e}"),
                         }
                     }
                 }
@@ -468,12 +497,14 @@ impl MftEncoder {
             let events: Option<IMFCollection> =
                 unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
             drop(events);
+            eprintln!("[MFT] after fallback wait, got {} bytes", all_data.len());
         }
 
         if all_data.is_empty() {
             return Err("no output from encoder".into());
         }
 
+        eprintln!("[MFT] encoded frame: {} bytes, keyframe={}", all_data.len(), got_keyframe);
         Ok(EncodedFrame {
             data: all_data,
             keyframe: got_keyframe,

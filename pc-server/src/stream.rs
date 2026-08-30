@@ -86,11 +86,8 @@ fn handle_client(
         bounds.width, bounds.height, bounds.left, bounds.top
     );
 
-    let mut encoder = if encoder_mft::is_hw_encoder_available() {
-        eprintln!("[stream] using GPU-accelerated MFT H.264 encoder");
-        Encoder::Mft(MftEncoder::new(bounds.width, bounds.height, fps, bitrate_kbps)?)
-    } else {
-        eprintln!("[stream] using OpenH264 software encoder");
+    let mut encoder = {
+        eprintln!("[stream] forcing software OpenH264 encoder for testing");
         Encoder::OpenH264(H264Encoder::new(bounds.width as usize, bounds.height as usize, fps, bitrate_kbps)?)
     };
     let mapping = ScreenMapping {
@@ -134,9 +131,14 @@ fn handle_client(
 
     // Writer loop: capture, encode, stream.
     let mut out = Vec::new();
+    let mut frame_count = 0u64;
     loop {
         match capture.next_frame_timeout(Duration::from_millis(200)) {
             Ok(frame) => {
+                frame_count += 1;
+                if frame_count % 60 == 0 {
+                    eprintln!("[stream] encoding frame {}", frame_count);
+                }
                 let encoded = encoder.encode_frame(&frame.bgra)?;
                 out.clear();
                 let payload = protocol::make_video_payload(

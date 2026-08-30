@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 struct ContentView: View {
     @StateObject private var model = AppModel()
@@ -111,6 +112,8 @@ private struct StreamView: UIViewControllerRepresentable {
     }
 
     final class Coordinator {
+        private var cancellable: AnyCancellable?
+
         func attach(model: AppModel, to view: StreamSurfaceView) {
             model.onFrame = { [weak view] pixel in
                 view?.display(pixelBuffer: pixel)
@@ -118,6 +121,16 @@ private struct StreamView: UIViewControllerRepresentable {
             view.onTouchEvents = { [weak model] events in
                 model?.sendTouches(events)
             }
+
+            // Update view.videoSize when model.videoSize changes.
+            cancellable = model.$videoSize
+                .sink { [weak view] size in
+                    view?.videoSize = size
+                }
+        }
+
+        deinit {
+            cancellable?.cancel()
         }
     }
 }
