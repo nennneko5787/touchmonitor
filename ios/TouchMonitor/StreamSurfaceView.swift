@@ -49,7 +49,13 @@ final class StreamSurfaceView: UIView {
         }
     }
 
-    // MARK: - Multitouch capture
+    // MARK: - Touch capture
+
+    /// Ensure the surface view is always hit-testable, even when embedded inside a
+    /// SwiftUI `UIViewRepresentable` (which can occasionally suppress hit testing).
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        return self
+    }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         NSLog("[TouchMonitor] touchesBegan count=\(touches.count)")
