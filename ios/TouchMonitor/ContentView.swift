@@ -11,6 +11,7 @@ struct ContentView: View {
         Group {
             if model.isConnected {
                 StreamView(model: model)
+                    .allowsHitTesting(true)
                     .edgesIgnoringSafeArea(.all)
             } else {
                 connectScreen

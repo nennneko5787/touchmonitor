@@ -119,9 +119,23 @@ class NetworkClient {
     /// Serializes and sends a batch of touches.
     /// `events` = [(id, active, x01, y01)] with normalized 0..1 coordinates.
     func sendTouches(_ events: [(id: UInt8, active: Bool, x: Float, y: Float)]) {
+        NSLog("[TouchMonitor] sendTouches events=\(events.count) state=\(stateDesc)")
         if case .connected = state, !events.isEmpty {
             let message = StreamProtocol.makeTouchMessage(events: events)
             connection.send(content: message, completion: .contentProcessed { _ in })
+            NSLog("[TouchMonitor] sendTouches -> sent \(message.count) bytes")
+        } else {
+            NSLog("[TouchMonitor] sendTouches -> SKIPPED (not connected or empty)")
+        }
+    }
+
+    private var stateDesc: String {
+        switch state {
+        case .idle: return "idle"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .failed(let e): return "failed(\(e))"
+        case .disconnected: return "disconnected"
         }
     }
 

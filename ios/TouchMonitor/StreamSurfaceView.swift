@@ -52,10 +52,12 @@ final class StreamSurfaceView: UIView {
     // MARK: - Multitouch capture
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        NSLog("[TouchMonitor] touchesBegan count=\(touches.count)")
         for touch in touches {
             let id = nextTouchID
             nextTouchID = nextTouchID &+ 1
             let point = normalized(touch, in: bounds)
+            NSLog("[TouchMonitor] began id=\(id) x=\(point.x) y=\(point.y) uiEnabled=\(isUserInteractionEnabled)")
             touchLock.lock()
             touchMap[ObjectIdentifier(touch)] = (id, point)
             touchLock.unlock()
@@ -102,6 +104,7 @@ final class StreamSurfaceView: UIView {
         let events = snapshot.compactMap { entry -> (id: UInt8, active: Bool, x: Float, y: Float)? in
             (entry.id, true, Float(entry.point.x), Float(entry.point.y))
         }
+        NSLog("[TouchMonitor] emitBatch events=\(events.count)")
         onTouchEvents?(events)
     }
 
