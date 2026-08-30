@@ -246,9 +246,11 @@ impl MftEncoder {
                         .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)
                 })
                 .and_then(|()| {
-                    // Keyframe every fps frames (1 per second). Ensures first frame is
-                    // an IDR, fixing the "black on connect" issue with iOS VideoToolbox.
-                    output_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps)
+                    // Keyframe every frame (IDR only) to ensure immediate decodability.
+                    // This solves the "black on connect" issue by guaranteeing the first frame
+                    // is an IDR with SPS/PPS. Adjust to a higher value (e.g., fps) for better
+                    // compression once streaming is stable.
+                    output_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 1)
                 })
                 .map_err(|e| format!("set output type attrs: {e}"))?;
             transform
