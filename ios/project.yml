@@ -1,0 +1,30 @@
+name: TouchMonitor
+options:
+  bundleIdPrefix: com.touchmonitor
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+targets:
+  TouchMonitor:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - TouchMonitor
+    scheme:
+      testTargets: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.touchmonitor.app
+        PRODUCT_NAME: TouchMonitor
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: TouchMonitor/Info.plist
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        DEVELOPMENT_TEAM: ""
+        ENABLE_BITCODE: NO
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: arm64

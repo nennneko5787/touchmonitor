@@ -1,0 +1,37 @@
+[package]
+name = "touchmonitor-server"
+version = "0.1.0"
+edition = "2021"
+description = "PC side: capture the screen, H.264-encode it, stream over USB to the iPad, and inject multitouch back into Windows."
+license = "MIT"
+
+[[bin]]
+name = "touchmonitor-server"
+path = "src/main.rs"
+
+[dependencies]
+openh264 = { version = "0.9", features = ["source"] }
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+]}
+bitflags = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

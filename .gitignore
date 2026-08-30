@@ -1,0 +1,19 @@
+# Rust
+pc-server/target/
+**/*.rs.bk
+
+# Xcode / iOS
+ios/TouchMonitor.xcodeproj/
+ios/build/
+ios/DerivedData/
+ios/*.ipa
+**/xcuserdata/
+**/*.xccheckout
+**/DerivedData/
+*.xcuserstate
+
+# macOS
+.DS_Store
+
+# Logs / misc
+*.log
