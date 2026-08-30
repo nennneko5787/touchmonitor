@@ -32,6 +32,7 @@ type SendTouchFn = unsafe extern "system" fn(count: u32, inputs: *const TouchInp
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(lp_module_name: *const u16) -> *mut core::ffi::c_void;
+    fn LoadLibraryW(lp_file_name: *const u16) -> *mut core::ffi::c_void;
     fn GetProcAddress(h_module: *mut core::ffi::c_void, lp_proc_name: *const u8) -> *mut core::ffi::c_void;
 }
 
@@ -54,13 +55,21 @@ struct TouchApi {
 impl TouchApi {
     fn resolve() -> Option<Self> {
         let name: Vec<u16> = "user32\0".encode_utf16().collect();
-        let user32 = unsafe { GetModuleHandleW(name.as_ptr()) };
+        // LoadLibraryW guarantees user32 is actually mapped (GetModuleHandleW only
+        // returns already-loaded modules, which can be NULL if nothing pulled user32 in).
+        let user32 = unsafe { LoadLibraryW(name.as_ptr()) };
         if user32.is_null() {
+            println!("touch: failed to load user32.dll");
             return None;
         }
         let init_ptr = unsafe { GetProcAddress(user32, b"InitializeTouchInjection\0".as_ptr()) };
         let send_ptr = unsafe { GetProcAddress(user32, b"SendTouchInput\0".as_ptr()) };
-        if init_ptr.is_null() || send_ptr.is_null() {
+        if init_ptr.is_null() {
+            println!("touch: InitializeTouchInjection not found");
+            return None;
+        }
+        if send_ptr.is_null() {
+            println!("touch: SendTouchInput not found");
             return None;
         }
         let init = unsafe { std::mem::transmute::<*mut core::ffi::c_void, InitTouchFn>(init_ptr) };
