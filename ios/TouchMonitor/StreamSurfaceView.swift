@@ -24,6 +24,10 @@ final class StreamSurfaceView: UIView {
     private var nextTouchID: UInt8 = 0
     private var touchLock = NSLock()
 
+    // Visual touch markers, so the user can see on the iPad whether the surface
+    // is actually receiving touches (no NSLog/console available in LiveContainer).
+    private var dotViews: [ObjectIdentifier: UIView] = [:]
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
@@ -58,12 +62,12 @@ final class StreamSurfaceView: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        NSLog("[TouchMonitor] touchesBegan count=\(touches.count)")
         for touch in touches {
             let id = nextTouchID
             nextTouchID = nextTouchID &+ 1
+            let loc = touch.location(in: self)
             let point = normalized(touch, in: bounds)
-            NSLog("[TouchMonitor] began id=\(id) x=\(point.x) y=\(point.y) uiEnabled=\(isUserInteractionEnabled)")
+            addDot(for: touch, at: loc)
             touchLock.lock()
             touchMap[ObjectIdentifier(touch)] = (id, point)
             touchLock.unlock()
@@ -75,6 +79,7 @@ final class StreamSurfaceView: UIView {
         var changed = false
         for touch in touches {
             let point = normalized(touch, in: bounds)
+            moveDot(for: touch, to: touch.location(in: self))
             touchLock.lock()
             if var stored = touchMap[ObjectIdentifier(touch)] {
                 stored.point = point
@@ -89,6 +94,7 @@ final class StreamSurfaceView: UIView {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             let point = normalized(touch, in: bounds)
+            removeDot(for: touch)
             touchLock.lock()
             if let stored = touchMap.removeValue(forKey: ObjectIdentifier(touch)) {
                 touchLock.unlock()
@@ -101,6 +107,34 @@ final class StreamSurfaceView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         touchesEnded(touches, with: event)
+    }
+
+    // MARK: - Visual touch markers (diagnostic)
+
+    private func addDot(for touch: UITouch, at point: CGPoint) {
+        let dot = UIView(frame: CGRect(x: 0, y: 0, width: 36, height: 36))
+        dot.center = point
+        dot.layer.cornerRadius = 18
+        dot.backgroundColor = UIColor.systemRed.withAlphaComponent(0.7)
+        dot.layer.borderColor = UIColor.white.cgColor
+        dot.layer.borderWidth = 2
+        dot.isUserInteractionEnabled = false
+        dotViews[ObjectIdentifier(touch)] = dot
+        if isOnScreen(point) {
+            addSubview(dot)
+        }
+    }
+
+    private func moveDot(for touch: UITouch, to point: CGPoint) {
+        dotViews[ObjectIdentifier(touch)]?.center = point
+    }
+
+    private func removeDot(for touch: UITouch) {
+        dotViews.removeValue(forKey: ObjectIdentifier(touch))?.removeFromSuperview()
+    }
+
+    private func isOnScreen(_ point: CGPoint) -> Bool {
+        bounds.contains(point)
     }
 
     private func emitBatch() {
