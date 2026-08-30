@@ -22,8 +22,6 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          working-directory: pc-server
 
       - name: Build
         run: cargo build --release
@@ -36,14 +34,16 @@ jobs:
 
   ios:
     name: Build iOS app (unsigned)
-    runs-on: macos-14
+    # xcodegen's latest output uses the Xcode 16 project format, which the
+    # Xcode 15 on macos-14 cannot open. macos-15 ships Xcode 16.
+    runs-on: macos-15
     defaults:
       run:
         working-directory: ios
     steps:
       - uses: actions/checkout@v4
 
-      # Use the runner's default Xcode (macos-14 ships Xcode 15, which is fine).
+      # Use the runner's default Xcode (macos-15 ships Xcode 16).
       - name: Install xcodegen
         run: brew install xcodegen
 
