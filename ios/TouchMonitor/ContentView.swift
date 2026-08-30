@@ -96,8 +96,9 @@ private struct StreamView: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> StreamHostViewController {
         let controller = StreamHostViewController()
-        controller.setSurface(StreamSurfaceView(frame: .zero))
-        context.coordinator.attach(model: model, to: controller.surface)
+        let surface = StreamSurfaceView(frame: .zero)
+        controller.setSurface(surface)
+        context.coordinator.attach(model: model, to: surface)
         return controller
     }
 
