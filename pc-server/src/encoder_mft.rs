@@ -22,6 +22,7 @@ pub struct MftEncoder {
     width: u32,
     height: u32,
     output_buf_size: u32,
+    first_frame: bool,
 }
 
 unsafe impl Send for MftEncoder {}
@@ -246,6 +247,11 @@ impl MftEncoder {
                     output_type
                         .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)
                 })
+                .and_then(|()| {
+                    // Keyframe every fps frames (1 per second). Ensures first frame is
+                    // an IDR, fixing the "black on connect" issue with iOS VideoToolbox.
+                    output_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps)
+                })
                 .map_err(|e| format!("set output type attrs: {e}"))?;
             transform
                 .SetOutputType(0, &output_type, 0)
@@ -300,6 +306,7 @@ impl MftEncoder {
             width,
             height,
             output_buf_size: width * height * 2,
+            first_frame: true,
         })
     }
 
@@ -330,6 +337,11 @@ impl MftEncoder {
                 .map_err(|e| format!("MFCreateMemoryBuffer UV: {e}"))?;
             fill_buffer(&uv_buf, &uv_plane).map_err(|e| format!("fill UV: {e}"))?;
             sample.AddBuffer(&uv_buf)?;
+            // Force first frame to be a keyframe (IDR) so iOS VideoToolbox can start decoding.
+            if self.first_frame {
+                sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)
+                    .map_err(|e| format!("Set CleanPoint: {e}"))?;
+            }
             sample
         };
 
@@ -339,6 +351,7 @@ impl MftEncoder {
                 .ProcessInput(self.input_stream_id, &input_sample, 0)
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
+        self.first_frame = false;
 
         // --- 4. Wait for METransformHaveOutput (blocking), then ProcessOutput ---
         wait_for_event(event_gen, METransformHaveOutput.0)?;

@@ -209,11 +209,6 @@ impl TouchInjector {
                 if h == 0 {
                     let err = unsafe { GetLastError() };
                     println!("touch: CreateSyntheticPointerDevice failed, lastErr={err}");
-                } else {
-                    println!(
-                        "touch: synthetic touch device created (hmonitor=0x{:X})",
-                        mapping.hmonitor
-                    );
                 }
                 (h != 0).then_some(h)
             }
