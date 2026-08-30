@@ -88,16 +88,20 @@ struct ContentView: View {
 }
 
 /// Displays the decoded desktop and forwards multitouch to the server.
-private struct StreamView: UIViewRepresentable {
+///
+/// Hosted by a UIViewController (rather than a bare UIView) so that the touch
+/// stream reaches the surface reliably inside SwiftUI.
+private struct StreamView: UIViewControllerRepresentable {
     let model: AppModel
 
-    func makeUIView(context: Context) -> StreamSurfaceView {
-        let view = StreamSurfaceView(frame: .zero)
-        context.coordinator.attach(model: model, to: view)
-        return view
+    func makeUIViewController(context: Context) -> StreamHostViewController {
+        let controller = StreamHostViewController()
+        controller.setSurface(StreamSurfaceView(frame: .zero))
+        context.coordinator.attach(model: model, to: controller.surface)
+        return controller
     }
 
-    func updateUIView(_ uiView: StreamSurfaceView, context: Context) {
+    func updateUIViewController(_ uiViewController: StreamHostViewController, context: Context) {
         // video + touch wiring is done once in the coordinator.
     }
 
@@ -113,6 +117,27 @@ private struct StreamView: UIViewRepresentable {
             view.onTouchEvents = { [weak model] events in
                 model?.sendTouches(events)
             }
+        }
+    }
+}
+
+/// A minimal UIViewController whose `view` is the `StreamSurfaceView`.
+///
+/// Hosting the surface under a UIViewController guarantees its view is
+/// treated as a first-class, hit-testable surface by the system, so touches
+/// reach `touchesBegan/Ended` even when presented through SwiftUI.
+final class StreamHostViewController: UIViewController {
+    private(set) var surface: StreamSurfaceView?
+
+    func setSurface(_ view: StreamSurfaceView) {
+        surface = view
+    }
+
+    override func loadView() {
+        if let surface = surface {
+            view = surface
+        } else {
+            view = UIView()
         }
     }
 }
