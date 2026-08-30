@@ -85,6 +85,7 @@ final class H264Decoder {
                 session,
                 sampleBuffer: sampleBuffer,
                 flags: VTDecodeFrameFlags(rawValue: 0),
+                frameRefcon: nil,
                 infoFlagsOut: &infoFlags
             )
         }
@@ -102,14 +103,14 @@ final class H264Decoder {
                     ppsBase.assumingMemoryBound(to: UInt8.self),
                 ]
                 var sizes: [Int] = [spsBytes.count, ppsBytes.count]
-                return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                return Int(CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     allocator: kCFAllocatorDefault,
                     parameterSetCount: 2,
                     parameterSetPointers: &pointers,
                     parameterSetSizes: &sizes,
                     nalUnitHeaderLength: 4,
                     formatDescriptionOut: &descOut
-                )
+                ))
             }
         }
         guard status == noErr, let desc = descOut else { return }
@@ -136,11 +137,7 @@ final class H264Decoder {
         guard sessionStatus == noErr, let newSession = newSession else { return }
 
         // Deliver frames quickly for interactive use.
-        VTDecompressionSessionSetProperty(
-            newSession,
-            key: kVTDecompressionPropertyKey_RealTime,
-            value: kCFBooleanTrue
-        )
+        VTSessionSetProperty(newSession, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         session = newSession
     }
 
@@ -175,9 +172,11 @@ final class H264Decoder {
         )
 
         var blockBuffer: CMBlockBuffer?
+        let bytePtr = CFDataGetBytePtr(cfData)
+        let memoryBlock = bytePtr.map { UnsafeMutableRawPointer(mutating: $0) }
         let status = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
-            memoryBlock: CFDataGetBytePtr(cfData),
+            memoryBlock: memoryBlock,
             blockLength: CFDataGetLength(cfData),
             blockAllocator: kCFAllocatorNull,
             customBlockSource: &customSource,
