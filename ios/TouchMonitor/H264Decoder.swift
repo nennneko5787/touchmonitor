@@ -211,7 +211,11 @@ enum H264NAL {
         while i < count {
             if let code = startCode(at: i) {
                 if let s = start {
-                    units.append(Data(bytes[s..<i]))
+                    let lo = min(s, count)
+                    let hi = min(i, count)
+                    if lo <= hi {
+                        units.append(Data(bytes[lo..<hi]))
+                    }
                 }
                 start = code.after
                 i = code.after
@@ -219,7 +223,7 @@ enum H264NAL {
                 i += 1
             }
         }
-        if let s = start {
+        if let s = start, s < count {
             units.append(Data(bytes[s..<count]))
         }
         return units

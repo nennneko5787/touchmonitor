@@ -27,6 +27,9 @@ class NetworkClient {
 
     private let connection: NWConnection
     private let decoder: H264Decoder
+
+    /// All reads/writes of `readBuffer` happen on `sendQueue` (the connection's
+    /// receive queue), so it is accessed serially.
     private var readBuffer = Data()
     private let sendQueue = DispatchQueue(label: "com.touchmonitor.send")
 
