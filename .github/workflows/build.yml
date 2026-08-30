@@ -79,7 +79,7 @@ jobs:
           path: ios/TouchMonitor-unsigned.ipa
 
   release:
-    name: Draft release
+    name: Pre-release
     needs: [pc-server, ios]
     runs-on: ubuntu-latest
     steps:
@@ -97,14 +97,14 @@ jobs:
           cp artifacts/TouchMonitor-ipa/TouchMonitor-unsigned.ipa assets/
           ls -la assets/
 
-      # Unique tag per run so drafts never collide: v0.1.<run>-<shortsha>.
-      - name: Create draft release
+      # Unique tag per run so pre-releases never collide: v0.1.<run>-<shortsha>.
+      - name: Create pre-release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           SHORT_SHA="${GITHUB_SHA:0:10}"
           TAG="v0.1.${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
-          NOTES="Automated draft release from CI run #${GITHUB_RUN_NUMBER}
+          NOTES="Automated pre-release from CI run #${GITHUB_RUN_NUMBER}
 
           * touchmonitor-server.exe : PC-side capture/encode/multitouch server (Windows)
           * TouchMonitor-unsigned.ipa : iOS viewer app (unsigned; install via AltStore etc.)
@@ -113,6 +113,6 @@ jobs:
 
           gh release create "$TAG" assets/* \
             --repo "$GITHUB_REPOSITORY" \
-            --draft \
+            --prerelease \
             --title "TouchMonitor v0.1.${GITHUB_RUN_NUMBER} (${SHORT_SHA})" \
             --notes "$NOTES"
