@@ -11,6 +11,7 @@
 
 mod capture;
 mod encoder;
+mod encoder_mft;
 mod protocol;
 mod stream;
 mod touch;

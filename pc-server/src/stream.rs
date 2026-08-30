@@ -6,11 +6,32 @@
 
 use crate::capture::{CaptureError, MonitorCapture, MonitorCaptureConfig};
 use crate::encoder::H264Encoder;
+use crate::encoder_mft::{self, MftEncoder};
 use crate::protocol;
 use crate::touch::{ScreenMapping, TouchInjector};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
+
+enum Encoder {
+    Mft(MftEncoder),
+    OpenH264(H264Encoder),
+}
+
+impl Encoder {
+    fn encode_frame(&mut self, bgra: &[u8]) -> Result<crate::encoder::EncodedFrame, Box<dyn std::error::Error>> {
+        match self {
+            Encoder::Mft(enc) => {
+                let frame = enc.encode_frame(bgra)?;
+                Ok(crate::encoder::EncodedFrame {
+                    data: frame.data,
+                    keyframe: frame.keyframe,
+                })
+            }
+            Encoder::OpenH264(enc) => enc.encode_frame(bgra),
+        }
+    }
+}
 
 pub fn run_server(
     bind: &str,
@@ -65,8 +86,13 @@ fn handle_client(
         bounds.width, bounds.height, bounds.left, bounds.top
     );
 
-    let mut encoder =
-        H264Encoder::new(bounds.width as usize, bounds.height as usize, fps, bitrate_kbps)?;
+    let mut encoder = if encoder_mft::is_hw_encoder_available() {
+        eprintln!("[stream] using GPU-accelerated MFT H.264 encoder");
+        Encoder::Mft(MftEncoder::new(bounds.width, bounds.height, fps, bitrate_kbps)?)
+    } else {
+        eprintln!("[stream] using OpenH264 software encoder");
+        Encoder::OpenH264(H264Encoder::new(bounds.width as usize, bounds.height as usize, fps, bitrate_kbps)?)
+    };
     let mapping = ScreenMapping {
         width: bounds.width,
         height: bounds.height,
