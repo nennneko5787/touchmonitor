@@ -64,24 +64,37 @@ struct PointerTouchInfo {
     pressure: u32,
 }
 
-type InitTouchFn = unsafe extern "system" fn(maximum_touches: u32, feedback_mode: u32) -> i32;
-type InjectTouchFn = unsafe extern "system" fn(count: u32, contacts: *const PointerTouchInfo) -> i32;
+/// `POINTER_TYPE_INFO` (winuser.h): pointer type + union of per-type info.
+/// For PT_TOUCH the union is `POINTER_TOUCH_INFO` (144 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PointerTypeInfo {
+    pointer_type: u32,
+    touch_info: PointerTouchInfo,
+}
+
+type CreateDeviceFn = unsafe extern "system" fn(
+    pointer_type: u32,
+    max_count: u32,
+    feedback_mode: u32,
+    hmonitor: usize,
+    device_width: u32,
+    device_height: u32,
+    options: u32,
+) -> usize;
+type InjectSyntheticFn = unsafe extern "system" fn(
+    device: usize,
+    pointer_info: *const PointerTypeInfo,
+    count: u32,
+) -> i32;
+type DestroyDeviceFn = unsafe extern "system" fn(device: usize) -> i32;
 
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryW(lp_file_name: *const u16) -> *mut core::ffi::c_void;
     fn GetProcAddress(h_module: *mut core::ffi::c_void, lp_proc_name: *const u8) -> *mut core::ffi::c_void;
     fn GetLastError() -> u32;
-    fn GetSystemMetrics(n_index: i32) -> i32;
 }
-
-// SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN: origin (top-left) of the virtual screen.
-// `InjectTouchInput` rejects coordinates outside the desktop bounds; in a
-// multi-monitor setup where a monitor sits left of the primary (which owns (0,0)),
-// that monitor has negative coordinates and would be rejected. Shifting by the
-// virtual-screen origin makes every monitor coordinate non-negative.
-const SM_XVIRTUALSCREEN: i32 = 76;
-const SM_YVIRTUALSCREEN: i32 = 77;
 
 // POINTER_FLAG_* (winuser.h)
 const POINTER_FLAG_INRANGE: u32 = 0x0000_0002;
@@ -90,8 +103,14 @@ const POINTER_FLAG_DOWN: u32 = 0x0001_0000;
 const POINTER_FLAG_UPDATE: u32 = 0x0002_0000;
 const POINTER_FLAG_UP: u32 = 0x0004_0000;
 
-// POINTER_INPUT_TYPE: PT_TOUCH
+/// POINTER_INPUT_TYPE: PT_TOUCH
 const PT_TOUCH: u32 = 0x0000_0002;
+
+// POINTER_FEEDBACK_MODE
+const POINTER_FEEDBACK_NONE: u32 = 0x2;
+
+// SYNTHETIC_DEVICE_CREATION_OPTIONS
+const SDCO_NONE: u32 = 0x0;
 
 // TOUCH_MASK_* (winuser.h)
 const TOUCH_MASK_CONTACTAREA: u32 = 0x0000_0001;
@@ -99,15 +118,14 @@ const TOUCH_MASK_CONTACTAREA: u32 = 0x0000_0001;
 // TOUCH_FLAG_NONE
 const TOUCH_FLAG_NONE: u32 = 0x0000_0000;
 
-const TOUCH_FEEDBACK_DEFAULT: u32 = 0x1;
-
 /// Contact radius for an injected finger, in pixels.
 const FINGER_RADIUS: i32 = 8;
 
-/// Dynamically-resolved user32 touch injection entry points.
+/// Dynamically-resolved user32 synthetic pointer (touch) injection entry points.
 struct TouchApi {
-    init: InitTouchFn,
-    inject: InjectTouchFn,
+    create: CreateDeviceFn,
+    inject: InjectSyntheticFn,
+    destroy: DestroyDeviceFn,
 }
 
 impl TouchApi {
@@ -120,47 +138,37 @@ impl TouchApi {
             println!("touch: failed to load user32.dll");
             return None;
         }
-        let init_ptr = unsafe { GetProcAddress(user32, b"InitializeTouchInjection\0".as_ptr()) };
-        let inject_ptr = unsafe { GetProcAddress(user32, b"InjectTouchInput\0".as_ptr()) };
-        if init_ptr.is_null() {
-            println!("touch: InitializeTouchInjection not found");
+        let create_ptr = unsafe { GetProcAddress(user32, b"CreateSyntheticPointerDevice\0".as_ptr()) };
+        let inject_ptr = unsafe { GetProcAddress(user32, b"InjectSyntheticPointerInput\0".as_ptr()) };
+        let destroy_ptr = unsafe { GetProcAddress(user32, b"DestroySyntheticPointerDevice\0".as_ptr()) };
+        if create_ptr.is_null() {
+            println!("touch: CreateSyntheticPointerDevice not found");
             return None;
         }
         if inject_ptr.is_null() {
-            println!("touch: InjectTouchInput not found");
+            println!("touch: InjectSyntheticPointerInput not found");
             return None;
         }
-        let init = unsafe { std::mem::transmute::<*mut core::ffi::c_void, InitTouchFn>(init_ptr) };
-        let inject = unsafe { std::mem::transmute::<*mut core::ffi::c_void, InjectTouchFn>(inject_ptr) };
-        Some(Self { init, inject })
+        if destroy_ptr.is_null() {
+            println!("touch: DestroySyntheticPointerDevice not found");
+            return None;
+        }
+        let create = unsafe { std::mem::transmute::<*mut core::ffi::c_void, CreateDeviceFn>(create_ptr) };
+        let inject = unsafe { std::mem::transmute::<*mut core::ffi::c_void, InjectSyntheticFn>(inject_ptr) };
+        let destroy = unsafe { std::mem::transmute::<*mut core::ffi::c_void, DestroyDeviceFn>(destroy_ptr) };
+        Some(Self { create, inject, destroy })
     }
 }
 
-/// Offsets from the top-left of the virtual screen (SM_XVIRTUALSCREEN etc.).
-///
-/// `InjectTouchInput` rejects coordinates outside the desktop bounds. In a
-/// multi-monitor setup where a monitor sits left of / above the primary monitor
-/// (which owns the origin (0,0)), that monitor has negative coordinates that are
-/// rejected. Subtracting these virtual-screen origin offsets makes every coordinate
-/// non-negative and accepted by the API.
-pub fn virtual_screen_origin() -> (i32, i32) {
-    let x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-    let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-    (x, y)
-}
-
-/// Maps normalized (0..1) stream coordinates back into screen pixel space for the
-/// monitor being captured.
+/// Maps normalized (0..1) stream coordinates back into monitor-relative pixel space
+/// (0,0 = top-left of the target monitor) and locates the target monitor handle for
+/// `CreateSyntheticPointerDevice`.
 #[derive(Clone, Copy)]
 pub struct ScreenMapping {
-    pub origin_x: i32,
-    pub origin_y: i32,
     pub width: u32,
     pub height: u32,
-    /// Min origin of the virtual screen (SM_XVIRTUALSCREEN etc.). Subtracted from
-    /// injected coordinates so they are non-negative (see `virtual_screen_origin`).
-    pub virtual_origin_x: i32,
-    pub virtual_origin_y: i32,
+    /// HMONITOR handle of the captured monitor (target for the synthetic device).
+    pub hmonitor: usize,
 }
 
 #[derive(Debug)]
@@ -171,72 +179,91 @@ pub enum TouchError {
 
 pub struct TouchInjector {
     api: Option<TouchApi>,
-    /// Set once `InitializeTouchInjection` has been called (lazily, on the same
-    /// thread that performs the injection, per the Win32 requirement that init and
-    /// inject happen on the same thread).
-    initialized: bool,
+    /// HSYNTHETICPOINTERDEVICE bound to the captured monitor (created in `new`).
+    device: Option<usize>,
     /// Per-touch-id bookkeeping: (id, x01, y01, active) so we can emit correct
     /// DOWN/MOVE/UP transitions between client messages.
     state: Mutex<Vec<(u32, f32, f32, bool)>>,
 }
 
 impl TouchInjector {
-    pub fn new() -> Self {
+    /// Create the synthetic pointer device targeting `mapping.hmonitor`. Injected
+    /// coordinates are then relative to that monitor (0,0 = its top-left), which is
+    /// why `InjectSyntheticPointerInput` (unlike `InjectTouchInput`) works for
+    /// monitors that sit left of / above the primary.
+    pub fn new(mapping: &ScreenMapping) -> Self {
+        let api = TouchApi::resolve();
+        let device = match api.as_ref() {
+            Some(api) => {
+                let h = unsafe {
+                    (api.create)(
+                        PT_TOUCH,
+                        10,
+                        POINTER_FEEDBACK_NONE,
+                        mapping.hmonitor,
+                        0,
+                        0,
+                        SDCO_NONE,
+                    )
+                };
+                if h == 0 {
+                    let err = unsafe { GetLastError() };
+                    println!("touch: CreateSyntheticPointerDevice failed, lastErr={err}");
+                } else {
+                    println!(
+                        "touch: synthetic touch device created (hmonitor=0x{:X})",
+                        mapping.hmonitor
+                    );
+                }
+                (h != 0).then_some(h)
+            }
+            None => None,
+        };
         Self {
-            api: TouchApi::resolve(),
-            initialized: false,
+            api,
+            device,
             state: Mutex::new(Vec::new()),
         }
     }
 
     pub fn unsupported(&self) -> bool {
-        self.api.is_none()
+        self.api.is_none() || self.device.is_none()
     }
 
-    /// Ensure `InitializeTouchInjection` has run on the *current* thread before the
-    /// first injection. Called from `apply_and_send`, guaranteeing same-thread init+inject.
-    fn ensure_initialized(&mut self) {
-        if self.initialized {
-            return;
+    /// Destroy the synthetic pointer device, releasing the pointer-insertion handle.
+    pub fn shutdown(&mut self) {
+        if let (Some(api), Some(device)) = (self.api.as_ref(), self.device.take()) {
+            unsafe { (api.destroy)(device) };
         }
-        if let Some(api) = self.api.as_ref() {
-            let ok = unsafe { (api.init)(10, TOUCH_FEEDBACK_DEFAULT) };
-            if ok == 0 {
-                let err = unsafe { GetLastError() };
-                println!("touch: InitializeTouchInjection failed, lastErr={err}");
-            } else {
-                println!("touch: InitializeTouchInjection OK");
-            }
-        }
-        self.initialized = true;
     }
 
-    /// Build the user32 `POINTER_TOUCH_INFO` array for a decoded touch message and
-    /// inject it. `events` is `&[(id, active, x01, y01)]` (see `protocol::decode_touch`).
+    /// Build the `POINTER_TYPE_INFO` array for a decoded touch message and inject it
+    /// through the synthetic pointer device. `events` is `&[(id, active, x01, y01)]`
+    /// (see `protocol::decode_touch`). Coordinates are monitor-relative (0..width,
+    /// 0..height) because the device was created bound to the captured monitor.
     pub fn apply_and_send(
         &mut self,
         events: &[(u8, bool, f32, f32)],
         mapping: &ScreenMapping,
     ) -> Result<(), TouchError> {
-        if self.api.is_none() {
+        let Some(api) = self.api.as_ref() else {
             return Err(TouchError::Unsupported);
-        }
+        };
+        let Some(device) = self.device else {
+            return Err(TouchError::Unsupported);
+        };
         if events.is_empty() {
             return Ok(());
         }
-        self.ensure_initialized();
 
-        let mut contacts: Vec<PointerTouchInfo> = Vec::with_capacity(events.len());
-        let api = self.api.as_ref().unwrap();
+        let mut infos: Vec<PointerTypeInfo> = Vec::with_capacity(events.len());
         {
             let mut state = self.state.lock().unwrap();
             for (id, active, x01, y01) in events {
                 let tid = *id as u32;
-                let abs_x = mapping.origin_x as f32 + *x01 * mapping.width as f32;
-                let abs_y = mapping.origin_y as f32 + *y01 * mapping.height as f32;
-                // Shift to non-negative virtual-screen space (see ScreenMapping fields).
-                let x = (abs_x - mapping.virtual_origin_x as f32) as i32;
-                let y = (abs_y - mapping.virtual_origin_y as f32) as i32;
+                // Monitor-relative coordinates: (0,0) is the captured monitor's top-left.
+                let x = (*x01 * mapping.width as f32) as i32;
+                let y = (*y01 * mapping.height as f32) as i32;
 
                 let prev = state.iter().find(|s| s.0 == tid);
                 let (prev_active, prev_x, prev_y) = match prev {
@@ -254,24 +281,27 @@ impl TouchInjector {
                     continue; // nothing changed
                 };
 
-                contacts.push(PointerTouchInfo {
-                    pointer_info: PointerInfo {
-                        pointer_type: PT_TOUCH,
-                        pointer_id: tid,
-                        frame_id: 0,
-                        pointer_flags: flags,
-                        pt_pixel_location: Point { x, y },
-                        ..PointerInfo::default()
+                infos.push(PointerTypeInfo {
+                    pointer_type: PT_TOUCH,
+                    touch_info: PointerTouchInfo {
+                        pointer_info: PointerInfo {
+                            pointer_type: PT_TOUCH,
+                            pointer_id: tid,
+                            frame_id: 0,
+                            pointer_flags: flags,
+                            pt_pixel_location: Point { x, y },
+                            ..PointerInfo::default()
+                        },
+                        touch_flags: TOUCH_FLAG_NONE,
+                        touch_mask: TOUCH_MASK_CONTACTAREA,
+                        rc_contact: Rect {
+                            left: x - FINGER_RADIUS,
+                            top: y - FINGER_RADIUS,
+                            right: x + FINGER_RADIUS,
+                            bottom: y + FINGER_RADIUS,
+                        },
+                        ..PointerTouchInfo::default()
                     },
-                    touch_flags: TOUCH_FLAG_NONE,
-                    touch_mask: TOUCH_MASK_CONTACTAREA,
-                    rc_contact: Rect {
-                        left: x - FINGER_RADIUS,
-                        top: y - FINGER_RADIUS,
-                        right: x + FINGER_RADIUS,
-                        bottom: y + FINGER_RADIUS,
-                    },
-                    ..PointerTouchInfo::default()
                 });
 
                 // update bookkeeping
@@ -285,32 +315,29 @@ impl TouchInjector {
             }
         }
 
-        if !contacts.is_empty() {
-            let ok = unsafe { (api.inject)(contacts.len() as u32, contacts.as_ptr()) };
+        if !infos.is_empty() {
+            let ok = unsafe { (api.inject)(device, infos.as_ptr(), infos.len() as u32) };
             if ok == 0 {
                 let err = unsafe { GetLastError() };
                 eprintln!(
-                    "touch inject error: SendFailed lastErr={err} origin=({},{}) size={}x{} ptr_info_size={} ptr_touch_size={} n={}",
-                    mapping.origin_x,
-                    mapping.origin_y,
+                    "touch inject error: SendFailed lastErr={err} size={}x{} ptr_type_info_size={} n={}",
                     mapping.width,
                     mapping.height,
-                    std::mem::size_of::<PointerInfo>(),
-                    std::mem::size_of::<PointerTouchInfo>(),
-                    contacts.len()
+                    std::mem::size_of::<PointerTypeInfo>(),
+                    infos.len()
                 );
-                for c in &contacts {
-                    let p = &c.pointer_info;
+                for ti in &infos {
+                    let p = &ti.touch_info.pointer_info;
                     eprintln!(
                         "  contact id={} flags=0x{:08X} pt=({},{}) rc=({},{},{},{})",
                         p.pointer_id,
                         p.pointer_flags,
                         p.pt_pixel_location.x,
                         p.pt_pixel_location.y,
-                        c.rc_contact.left,
-                        c.rc_contact.top,
-                        c.rc_contact.right,
-                        c.rc_contact.bottom
+                        ti.touch_info.rc_contact.left,
+                        ti.touch_info.rc_contact.top,
+                        ti.touch_info.rc_contact.right,
+                        ti.touch_info.rc_contact.bottom
                     );
                 }
                 return Err(TouchError::SendFailed);
