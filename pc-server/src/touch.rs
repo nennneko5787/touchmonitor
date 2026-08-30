@@ -261,7 +261,6 @@ impl TouchInjector {
                         frame_id: 0,
                         pointer_flags: flags,
                         pt_pixel_location: Point { x, y },
-                        pt_himetric_location: Point { x, y },
                         ..PointerInfo::default()
                     },
                     touch_flags: TOUCH_FLAG_NONE,
