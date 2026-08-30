@@ -71,6 +71,7 @@ type InjectTouchFn = unsafe extern "system" fn(count: u32, contacts: *const Poin
 extern "system" {
     fn LoadLibraryW(lp_file_name: *const u16) -> *mut core::ffi::c_void;
     fn GetProcAddress(h_module: *mut core::ffi::c_void, lp_proc_name: *const u8) -> *mut core::ffi::c_void;
+    fn GetLastError() -> u32;
 }
 
 // POINTER_FLAG_* (winuser.h)
@@ -154,7 +155,13 @@ impl TouchInjector {
         let api = TouchApi::resolve();
         if let Some(ref api) = api {
             // Prepare the OS for up to 10 simultaneous touch points.
-            unsafe { (api.init)(10, TOUCH_FEEDBACK_DEFAULT) };
+            let ok = unsafe { (api.init)(10, TOUCH_FEEDBACK_DEFAULT) };
+            if ok == 0 {
+                let err = unsafe { GetLastError() };
+                println!("touch: InitializeTouchInjection failed, lastErr={err}");
+            } else {
+                println!("touch: InitializeTouchInjection OK");
+            }
         }
         Self {
             api,
@@ -237,6 +244,8 @@ impl TouchInjector {
         if !contacts.is_empty() {
             let ok = unsafe { (api.inject)(contacts.len() as u32, contacts.as_ptr()) };
             if ok == 0 {
+                let err = unsafe { GetLastError() };
+                eprintln!("touch inject error: SendFailed lastErr={err}");
                 return Err(TouchError::SendFailed);
             }
         }
