@@ -37,12 +37,9 @@ final class StreamSurfaceView: UIView {
     // MARK: - Video rendering
 
     func display(pixelBuffer: CVPixelBuffer) {
-        // The buffer may have been returned to the decoder's pool once the decode
-        // callback returns. Retain it for the lifetime of the render block so
-        // CIContext always reads valid pixels even if the block runs late.
-        CVPixelBufferRetain(pixelBuffer)
+        // Capturing `pixelBuffer` in the async block keeps it alive (ARC manages
+        // CVPixelBuffer automatically) until the render work is done.
         renderQueue.async { [weak self] in
-            defer { CVPixelBufferRelease(pixelBuffer) }
             guard let self = self else { return }
             let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
             guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
