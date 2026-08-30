@@ -14,8 +14,6 @@ use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 
-const LOG_ENABLED: bool = false; // Set to true to enable verbose logging
-
 pub struct MftEncoder {
     transform: Option<IMFTransform>,
     event_gen: Option<IMFMediaEventGenerator>,
@@ -37,15 +35,12 @@ fn mf_runtime_init() -> bool {
     static INIT: OnceLock<bool> = OnceLock::new();
     *INIT.get_or_init(|| unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-match MFStartup(MF_VERSION, MFSTARTUP_FULL) {
-             Ok(()) => true,
-             Err(e) => {
-                 if LOG_ENABLED {
-                     eprintln!("[MFT] MFStartup failed: {e}");
-                 }
-                 false
-             }
-         }
+        match MFStartup(MF_VERSION, MFSTARTUP_FULL) {
+            Ok(()) => true,
+            Err(e) => {
+                false
+            }
+        }
     })
 }
 
@@ -194,9 +189,6 @@ impl MftEncoder {
 
 let activate = match enumerate_hw_h264_encoders() {
              Ok(hw) if !hw.is_empty() => {
-                 if LOG_ENABLED {
-                     eprintln!("[MFT] using hardware H.264 encoder");
-                 }
                  hw.into_iter().next().unwrap()
              }
              _ => {
@@ -204,9 +196,6 @@ let activate = match enumerate_hw_h264_encoders() {
                      .map_err(|e| format!("enumerate SW encoders: {e}"))?;
                  if sw.is_empty() {
                      return Err("no H.264 encoder MFT found".into());
-                 }
-                 if LOG_ENABLED {
-                     eprintln!("[MFT] using software H.264 encoder");
                  }
                  sw.into_iter().next().unwrap()
              }
@@ -301,24 +290,18 @@ let activate = match enumerate_hw_h264_encoders() {
                 .map_err(|e| format!("START_OF_STREAM: {e}"))?;
         }
 
-        eprintln!(
-            "[MFT] encoder initialized: {}x{} @ {}fps, {}kbps",
-            width, height, fps, bitrate_kbps
-        );
-
-        Ok(Self {
-            transform: Some(transform),
-            event_gen: Some(event_gen),
-            input_stream_id: 0,
-            output_stream_id: 0,
-            width,
-            height,
-            output_buf_size: width * height * 2,
-        })
+Ok(Self {
+                 transform: Some(transform),
+                 event_gen: Some(event_gen),
+                 input_stream_id: 0,
+                 output_stream_id: 0,
+                 width,
+                 height,
+                 output_buf_size: width * height * 2,
+             })
     }
 
     pub fn encode_frame(&mut self, bgra: &[u8]) -> Result<EncodedFrame, Box<dyn std::error::Error>> {
-        eprintln!("[MFT] encode_frame called");
         let transform = self
             .transform
             .as_ref()
@@ -330,12 +313,9 @@ let activate = match enumerate_hw_h264_encoders() {
 
         // Convert BGRA -> NV12
         let (y_plane, uv_plane) = bgra_to_nv12(bgra, self.width as usize, self.height as usize);
-        eprintln!("[MFT] BGRA->NV12 conversion done");
 
         // --- 1. Wait for METransformNeedInput (blocking) ---
-        eprintln!("[MFT] waiting for METransformNeedInput");
         wait_for_event(event_gen, METransformNeedInput.0)?;
-        eprintln!("[MFT] got METransformNeedInput");
 
         // --- 2. Create input sample ---
         let input_sample = unsafe {
@@ -350,22 +330,18 @@ let activate = match enumerate_hw_h264_encoders() {
             sample.AddBuffer(&uv_buf)?;
             sample
         };
-        eprintln!("[MFT] input sample created");
 
         // --- 3. ProcessInput ---
-        eprintln!("[MFT] calling ProcessInput");
         unsafe {
             transform
                 .ProcessInput(self.input_stream_id, &input_sample, 0)
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
-        eprintln!("[MFT] ProcessInput succeeded");
 
         // --- 4. Drain ALL available output (may be multiple frames) ---
         let mut all_data = Vec::new();
         let mut got_keyframe = false;
 
-        eprintln!("[MFT] entering output drain loop");
         loop {
             // Non-blocking poll for METransformHaveOutput
             let event = unsafe {
@@ -378,7 +354,6 @@ let activate = match enumerate_hw_h264_encoders() {
             let event_type = unsafe { event.GetType().unwrap_or(0) };
 
             if event_type as i32 == METransformHaveOutput.0 {
-                eprintln!("[MFT] got METransformHaveOutput event");
                 // Process output
                 let output_sample = unsafe {
                     let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
@@ -404,7 +379,6 @@ let activate = match enumerate_hw_h264_encoders() {
                     )
                 } {
                     Ok(()) => {
-                        eprintln!("[MFT] ProcessOutput succeeded");
                         let sample_opt: Option<IMFSample> =
                             unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
                         if let Some(sample) = sample_opt {
@@ -413,25 +387,17 @@ let activate = match enumerate_hw_h264_encoders() {
                             };
                             if flags == 1 {
                                 got_keyframe = true;
-                                eprintln!("[MFT] output frame is keyframe");
-                            } else {
-                                eprintln!("[MFT] output frame is not keyframe (flags={})", flags);
                             }
                             match unsafe { read_sample_data(&sample) } {
-                                Ok(data) => {
-                                    eprintln!("[MFT] read {} bytes from output sample", data.len());
-                                    all_data.extend_from_slice(&data);
-                                }
-                                Err(e) => eprintln!("[MFT] read_sample: {e}"),
+                                Ok(data) => all_data.extend_from_slice(&data),
+                                Err(e) => {}
                             }
                         }
                     }
                     Err(hr) => {
                         if hr.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
-                            eprintln!("[MFT] ProcessOutput returned MF_E_TRANSFORM_NEED_MORE_INPUT");
                             break;
                         }
-                        eprintln!("[MFT] ProcessOutput failed with hr={:x}", hr.code().0);
                         break;
                     }
                 }
@@ -440,18 +406,14 @@ let activate = match enumerate_hw_h264_encoders() {
                     unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
                 drop(events);
             } else {
-                eprintln!("[MFT] non-HaveOutput event type={}, breaking", event_type);
                 // Not a HaveOutput event; requeue logic not needed as we're polling
                 break;
             }
         }
-        eprintln!("[MFT] exited output drain loop, got {} bytes", all_data.len());
 
         // If no output this frame, wait for the next HaveOutput event and process it
         if all_data.is_empty() {
-            eprintln!("[MFT] no output yet, waiting for METransformHaveOutput");
             wait_for_event(event_gen, METransformHaveOutput.0)?;
-            eprintln!("[MFT] got METransformHaveOutput after wait");
 
             let output_sample = unsafe {
                 let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
@@ -477,7 +439,6 @@ let activate = match enumerate_hw_h264_encoders() {
                 )
             } {
                 Ok(()) => {
-                    eprintln!("[MFT] ProcessOutput (fallback) succeeded");
                     let sample_opt: Option<IMFSample> =
                         unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
                     if let Some(sample) = sample_opt {
@@ -486,16 +447,10 @@ let activate = match enumerate_hw_h264_encoders() {
                         };
                         if flags == 1 {
                             got_keyframe = true;
-                            eprintln!("[MFT] fallback output frame is keyframe");
-                        } else {
-                            eprintln!("[MFT] fallback output frame is not keyframe (flags={})", flags);
                         }
                         match unsafe { read_sample_data(&sample) } {
-                            Ok(data) => {
-                                eprintln!("[MFT] read {} bytes from fallback output sample", data.len());
-                                all_data.extend_from_slice(&data);
-                            }
-                            Err(e) => eprintln!("[MFT] read_sample fallback: {e}"),
+                            Ok(data) => all_data.extend_from_slice(&data),
+                            Err(e) => {}
                         }
                     }
                 }
@@ -505,14 +460,12 @@ let activate = match enumerate_hw_h264_encoders() {
             let events: Option<IMFCollection> =
                 unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
             drop(events);
-            eprintln!("[MFT] after fallback wait, got {} bytes", all_data.len());
         }
 
         if all_data.is_empty() {
             return Err("no output from encoder".into());
         }
 
-        eprintln!("[MFT] encoded frame: {} bytes, keyframe={}", all_data.len(), got_keyframe);
         Ok(EncodedFrame {
             data: all_data,
             keyframe: got_keyframe,
