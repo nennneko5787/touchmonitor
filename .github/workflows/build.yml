@@ -104,13 +104,15 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA:0:10}"
           TAG="v0.1.${GITHUB_RUN_NUMBER}-${SHORT_SHA}"
+          NOTES="Automated draft release from CI run #${GITHUB_RUN_NUMBER}
+
+          * touchmonitor-server.exe : PC-side capture/encode/multitouch server (Windows)
+          * TouchMonitor-unsigned.ipa : iOS viewer app (unsigned; install via AltStore etc.)
+
+          Note: USB tethering on a physical device is not yet verified."
+
           gh release create "$TAG" assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
             --title "TouchMonitor v0.1.${GITHUB_RUN_NUMBER} (${SHORT_SHA})" \
-            --notes "Automated draft release from CI run #${GITHUB_RUN_NUMBER}.
-
-- touchmonitor-server.exe : PC-side capture/encode/multitouch server (Windows)
-- TouchMonitor-unsigned.ipa : iOS viewer app (unsigned; install via AltStore etc.)
-
-Note: USB tethering on a physical device is not yet verified."
+            --notes "$NOTES"
