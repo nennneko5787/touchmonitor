@@ -145,6 +145,10 @@ pub enum TouchError {
 
 pub struct TouchInjector {
     api: Option<TouchApi>,
+    /// Set once `InitializeTouchInjection` has been called (lazily, on the same
+    /// thread that performs the injection, per the Win32 requirement that init and
+    /// inject happen on the same thread).
+    initialized: bool,
     /// Per-touch-id bookkeeping: (id, x01, y01, active) so we can emit correct
     /// DOWN/MOVE/UP transitions between client messages.
     state: Mutex<Vec<(u32, f32, f32, bool)>>,
@@ -152,9 +156,24 @@ pub struct TouchInjector {
 
 impl TouchInjector {
     pub fn new() -> Self {
-        let api = TouchApi::resolve();
-        if let Some(ref api) = api {
-            // Prepare the OS for up to 10 simultaneous touch points.
+        Self {
+            api: TouchApi::resolve(),
+            initialized: false,
+            state: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn unsupported(&self) -> bool {
+        self.api.is_none()
+    }
+
+    /// Ensure `InitializeTouchInjection` has run on the *current* thread before the
+    /// first injection. Called from `apply_and_send`, guaranteeing same-thread init+inject.
+    fn ensure_initialized(&mut self) {
+        if self.initialized {
+            return;
+        }
+        if let Some(api) = self.api.as_ref() {
             let ok = unsafe { (api.init)(10, TOUCH_FEEDBACK_DEFAULT) };
             if ok == 0 {
                 let err = unsafe { GetLastError() };
@@ -163,14 +182,7 @@ impl TouchInjector {
                 println!("touch: InitializeTouchInjection OK");
             }
         }
-        Self {
-            api,
-            state: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn unsupported(&self) -> bool {
-        self.api.is_none()
+        self.initialized = true;
     }
 
     /// Build the user32 `POINTER_TOUCH_INFO` array for a decoded touch message and
@@ -180,14 +192,16 @@ impl TouchInjector {
         events: &[(u8, bool, f32, f32)],
         mapping: &ScreenMapping,
     ) -> Result<(), TouchError> {
-        let Some(ref api) = self.api else {
+        if self.api.is_none() {
             return Err(TouchError::Unsupported);
-        };
+        }
         if events.is_empty() {
             return Ok(());
         }
+        self.ensure_initialized();
 
         let mut contacts: Vec<PointerTouchInfo> = Vec::with_capacity(events.len());
+        let api = self.api.as_ref().unwrap();
         {
             let mut state = self.state.lock().unwrap();
             for (id, active, x01, y01) in events {
