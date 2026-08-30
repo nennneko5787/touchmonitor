@@ -101,56 +101,56 @@ fn handle_client(
     let mut write_stream = stream.try_clone()?;
     let mut reader = stream;
 
-    // Reader thread: touch messages in, inject into Windows.
-    let _reader_thread = std::thread::spawn(move || {
-        let mut injector = injector;
-        loop {
-            let (msg, payload) = match protocol::read_message(&mut reader) {
-                Ok(m) => m,
-                Err(_) => break, // client closed the stream
-            };
-            println!("recv: type={msg} len={}", payload.len());
-            match msg {
-                protocol::MSG_TOUCH => {
-                    if let Some(events) = protocol::decode_touch(&payload) {
-                        let first = events.first().map(|e| format!("id={} a={} x={:.2} y={:.2}", e.0, e.1, e.2, e.3)).unwrap_or_default();
-                        println!("touch: {} events [{}]", events.len(), first);
-                        match injector.apply_and_send(&events, &mapping) {
-                            Ok(()) => {}
-                            Err(e) => eprintln!("touch inject error: {e:?}"),
-                        }
-                    } else {
-                        println!("touch: decode FAILED (payload len {})", payload.len());
-                    }
-                }
-                protocol::MSG_PING => { /* no-op; TCP handles keep-alive */ }
-                _ => break, // unexpected message from the client
-            }
-        }
-    });
+// Reader thread: touch messages in, inject into Windows.
+     let _reader_thread = std::thread::spawn(move || {
+         let mut injector = injector;
+         loop {
+             let (msg, payload) = match protocol::read_message(&mut reader) {
+                 Ok(m) => m,
+                 Err(_) => break, // client closed the stream
+             };
+             // println!("recv: type={msg} len={}", payload.len());
+             match msg {
+                 protocol::MSG_TOUCH => {
+                     if let Some(events) = protocol::decode_touch(&payload) {
+                         let first = events.first().map(|e| format!("id={} a={} x={:.2} y={:.2}", e.0, e.1, e.2, e.3)).unwrap_or_default();
+                         // println!("touch: {} events [{}]", events.len(), first);
+                         match injector.apply_and_send(&events, &mapping) {
+                             Ok(()) => {}
+                             Err(e) => eprintln!("touch inject error: {e:?}"),
+                         }
+                     } else {
+                         println!("touch: decode FAILED (payload len {})", payload.len());
+                     }
+                 }
+                 protocol::MSG_PING => { /* no-op; TCP handles keep-alive */ }
+                 _ => break, // unexpected message from the client
+             }
+         }
+     });
 
-    // Writer loop: capture, encode, stream.
-    let mut out = Vec::new();
-    let mut frame_count = 0u64;
-    loop {
-        match capture.next_frame_timeout(Duration::from_millis(200)) {
-            Ok(frame) => {
-                frame_count += 1;
-                if frame_count % 60 == 0 {
-                    eprintln!("[stream] encoding frame {}", frame_count);
-                }
-                let encoded = encoder.encode_frame(&frame.bgra)?;
-                out.clear();
-                let payload = protocol::make_video_payload(
-                    encoded.keyframe,
-                    frame.width,
-                    frame.height,
-                    &encoded.data,
-                );
-                protocol::write_message(&mut out, protocol::MSG_VIDEO, &payload);
-                write_stream.write_all(&out)?;
-                write_stream.flush()?;
-            }
+// Writer loop: capture, encode, stream.
+     let mut out = Vec::new();
+     let mut frame_count = 0u64;
+     loop {
+         match capture.next_frame_timeout(Duration::from_millis(200)) {
+             Ok(frame) => {
+                 frame_count += 1;
+                 // if frame_count % 60 == 0 {
+                 //     eprintln!("[stream] encoding frame {}", frame_count);
+                 // }
+                 let encoded = encoder.encode_frame(&frame.bgra)?;
+                 out.clear();
+                 let payload = protocol::make_video_payload(
+                     encoded.keyframe,
+                     frame.width,
+                     frame.height,
+                     &encoded.data,
+                 );
+                 protocol::write_message(&mut out, protocol::MSG_VIDEO, &payload);
+                 write_stream.write_all(&out)?;
+                 write_stream.flush()?;
+             }
             Err(CaptureError::Timeout) => {
                 // Nothing new to send; keep waiting.
                 continue;
