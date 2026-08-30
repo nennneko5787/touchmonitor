@@ -390,14 +390,18 @@ impl MftEncoder {
 
         let sample = sample_opt.ok_or("no output sample from MFT")?;
         let flags = unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) };
-        let data = unsafe { read_sample_data(&sample) }?;
+        let avcc_data = unsafe { read_sample_data(&sample) }?;
 
-        if data.is_empty() {
+        // Convert AVCC (length-prefixed NAL units) to Annex-B (start code prefixed)
+        // for iOS VideoToolbox compatibility
+        let annex_b_data = avcc_to_annex_b(&avcc_data)?;
+
+        if annex_b_data.is_empty() {
             return Err("empty output from encoder".into());
         }
 
         Ok(EncodedFrame {
-            data,
+            data: annex_b_data,
             keyframe: flags == 1,
         })
     }
@@ -426,4 +430,31 @@ pub fn is_hw_encoder_available() -> bool {
             Err(_) => false,
         }
     })
+}
+
+/// Convert AVCC format (length-prefixed NAL units) to Annex-B format
+/// (start code prefixed) for iOS VideoToolbox compatibility.
+fn avcc_to_annex_b(avcc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut pos = 0;
+    let mut annex_b = Vec::with_capacity(avcc_data.len() + 16);
+    while pos < avcc_data.len() {
+        if pos + 4 > avcc_data.len() {
+            break;
+        }
+        let nal_len = u32::from_be_bytes([
+            avcc_data[pos],
+            avcc_data[pos + 1],
+            avcc_data[pos + 2],
+            avcc_data[pos + 3],
+        ]) as usize;
+        pos += 4;
+        if pos + nal_len > avcc_data.len() {
+            break;
+        }
+        // Annex-B start code: 0x00 0x00 0x00 0x01
+        annex_b.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        annex_b.extend_from_slice(&avcc_data[pos..pos + nal_len]);
+        pos += nal_len;
+    }
+    Ok(annex_b)
 }
