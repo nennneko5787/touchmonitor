@@ -7,7 +7,7 @@
 use crate::capture::{CaptureError, MonitorCapture, MonitorCaptureConfig};
 use crate::encoder::H264Encoder;
 use crate::protocol;
-use crate::touch::{ScreenMapping, TouchInjector};
+use crate::touch::{virtual_screen_origin, ScreenMapping, TouchInjector};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -68,11 +68,14 @@ fn handle_client(
     let mut encoder =
         H264Encoder::new(bounds.width as usize, bounds.height as usize, fps, bitrate_kbps)?;
     let injector = TouchInjector::new();
+    let (virtual_origin_x, virtual_origin_y) = virtual_screen_origin();
     let mapping = ScreenMapping {
         origin_x: bounds.left,
         origin_y: bounds.top,
         width: bounds.width,
         height: bounds.height,
+        virtual_origin_x,
+        virtual_origin_y,
     };
 
     // Split the TCP stream for concurrent read/write.

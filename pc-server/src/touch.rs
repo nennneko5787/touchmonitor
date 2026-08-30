@@ -72,7 +72,16 @@ extern "system" {
     fn LoadLibraryW(lp_file_name: *const u16) -> *mut core::ffi::c_void;
     fn GetProcAddress(h_module: *mut core::ffi::c_void, lp_proc_name: *const u8) -> *mut core::ffi::c_void;
     fn GetLastError() -> u32;
+    fn GetSystemMetrics(n_index: i32) -> i32;
 }
+
+// SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN: origin (top-left) of the virtual screen.
+// `InjectTouchInput` rejects coordinates outside the desktop bounds; in a
+// multi-monitor setup where a monitor sits left of the primary (which owns (0,0)),
+// that monitor has negative coordinates and would be rejected. Shifting by the
+// virtual-screen origin makes every monitor coordinate non-negative.
+const SM_XVIRTUALSCREEN: i32 = 76;
+const SM_YVIRTUALSCREEN: i32 = 77;
 
 // POINTER_FLAG_* (winuser.h)
 const POINTER_FLAG_INRANGE: u32 = 0x0000_0002;
@@ -127,6 +136,19 @@ impl TouchApi {
     }
 }
 
+/// Offsets from the top-left of the virtual screen (SM_XVIRTUALSCREEN etc.).
+///
+/// `InjectTouchInput` rejects coordinates outside the desktop bounds. In a
+/// multi-monitor setup where a monitor sits left of / above the primary monitor
+/// (which owns the origin (0,0)), that monitor has negative coordinates that are
+/// rejected. Subtracting these virtual-screen origin offsets makes every coordinate
+/// non-negative and accepted by the API.
+pub fn virtual_screen_origin() -> (i32, i32) {
+    let x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    (x, y)
+}
+
 /// Maps normalized (0..1) stream coordinates back into screen pixel space for the
 /// monitor being captured.
 #[derive(Clone, Copy)]
@@ -135,6 +157,10 @@ pub struct ScreenMapping {
     pub origin_y: i32,
     pub width: u32,
     pub height: u32,
+    /// Min origin of the virtual screen (SM_XVIRTUALSCREEN etc.). Subtracted from
+    /// injected coordinates so they are non-negative (see `virtual_screen_origin`).
+    pub virtual_origin_x: i32,
+    pub virtual_origin_y: i32,
 }
 
 #[derive(Debug)]
@@ -206,8 +232,11 @@ impl TouchInjector {
             let mut state = self.state.lock().unwrap();
             for (id, active, x01, y01) in events {
                 let tid = *id as u32;
-                let x = (mapping.origin_x as f32 + *x01 * mapping.width as f32) as i32;
-                let y = (mapping.origin_y as f32 + *y01 * mapping.height as f32) as i32;
+                let abs_x = mapping.origin_x as f32 + *x01 * mapping.width as f32;
+                let abs_y = mapping.origin_y as f32 + *y01 * mapping.height as f32;
+                // Shift to non-negative virtual-screen space (see ScreenMapping fields).
+                let x = (abs_x - mapping.virtual_origin_x as f32) as i32;
+                let y = (abs_y - mapping.virtual_origin_y as f32) as i32;
 
                 let prev = state.iter().find(|s| s.0 == tid);
                 let (prev_active, prev_x, prev_y) = match prev {
