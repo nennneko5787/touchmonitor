@@ -79,6 +79,7 @@ pub struct ScreenMapping {
     pub height: u32,
 }
 
+#[derive(Debug)]
 pub enum TouchError {
     Unsupported,
     SendFailed,

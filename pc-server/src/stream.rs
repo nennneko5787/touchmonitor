@@ -90,7 +90,15 @@ fn handle_client(
             match msg {
                 protocol::MSG_TOUCH => {
                     if let Some(events) = protocol::decode_touch(&payload) {
-                        let _ = injector.apply_and_send(&events, &mapping);
+                        // Enable with TOUCHMONITOR_DEBUG_TOUCH=1 in the environment.
+                        if std::env::var_os("TOUCHMONITOR_DEBUG_TOUCH").is_some() {
+                            let first = events.first().map(|e| format!("id={} a={} x={:.2} y={:.2}", e.0, e.1, e.2, e.3)).unwrap_or_default();
+                            println!("touch: {} events [{}]", events.len(), first);
+                        }
+                        match injector.apply_and_send(&events, &mapping) {
+                            Ok(()) => {}
+                            Err(e) => eprintln!("touch inject error: {e:?}"),
+                        }
                     }
                 }
                 protocol::MSG_PING => { /* no-op; TCP handles keep-alive */ }
