@@ -1,8 +1,8 @@
 //! GPU-accelerated H.264 encoder using Windows Media Foundation (MFT).
 //!
-//! Hardware MFTs (Intel QSV, AMD VCN, NVIDIA NVENC) are truly async.
-//! We use IMFMediaEventGenerator to drive ProcessInput / ProcessOutput
-//! via METransformNeedInput / METransformHaveOutput events.
+//! Hardware MFTs (Intel QSV, AMD VCN, NVIDIA NVENC) are async. We use
+//! IMFMediaEventGenerator for METransformNeedInput / METransformHaveOutput
+//! events, but with a simpler polling-based drain loop.
 //!
 //! Input: BGRA8 frames (from Windows Graphics Capture).
 //! Output: Annex-B H.264 access units.
@@ -22,7 +22,6 @@ pub struct MftEncoder {
     width: u32,
     height: u32,
     output_buf_size: u32,
-    first_frame: bool,
 }
 
 unsafe impl Send for MftEncoder {}
@@ -164,7 +163,6 @@ unsafe fn read_sample_data(sample: &IMFSample) -> Result<Vec<u8>, windows::core:
 }
 
 /// Block until the next event of the desired type arrives.
-/// Uses blocking GetEvent so the MFT's work queue can deliver events.
 fn wait_for_event(
     event_gen: &IMFMediaEventGenerator,
     expected: i32,
@@ -306,7 +304,6 @@ impl MftEncoder {
             width,
             height,
             output_buf_size: width * height * 2,
-            first_frame: true,
         })
     }
 
@@ -337,11 +334,6 @@ impl MftEncoder {
                 .map_err(|e| format!("MFCreateMemoryBuffer UV: {e}"))?;
             fill_buffer(&uv_buf, &uv_plane).map_err(|e| format!("fill UV: {e}"))?;
             sample.AddBuffer(&uv_buf)?;
-            // Force first frame to be a keyframe (IDR) so iOS VideoToolbox can start decoding.
-            if self.first_frame {
-                sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)
-                    .map_err(|e| format!("Set CleanPoint: {e}"))?;
-            }
             sample
         };
 
@@ -351,54 +343,138 @@ impl MftEncoder {
                 .ProcessInput(self.input_stream_id, &input_sample, 0)
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
-        self.first_frame = false;
 
-        // --- 4. Wait for METransformHaveOutput (blocking), then ProcessOutput ---
-        wait_for_event(event_gen, METransformHaveOutput.0)?;
+        // --- 4. Drain ALL available output (may be multiple frames) ---
+        let mut all_data = Vec::new();
+        let mut got_keyframe = false;
 
-        let output_sample = unsafe {
-            let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
-            let buf = MFCreateMemoryBuffer(self.output_buf_size)
-                .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
-            sample.AddBuffer(&buf)?;
-            sample
-        };
+        loop {
+            // Non-blocking poll for METransformHaveOutput
+            let event = unsafe {
+                match event_gen.GetEvent(MF_EVENT_FLAG_NO_WAIT) {
+                    Ok(e) => e,
+                    Err(_) => break, // No more events, done
+                }
+            };
 
-        let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
-            dwStreamID: self.output_stream_id,
-            pSample: ManuallyDrop::new(Some(output_sample)),
-            dwStatus: 0,
-            pEvents: ManuallyDrop::new(None),
-        };
+            let event_type = unsafe { event.GetType().unwrap_or(0) };
 
-        let mut output_status = 0u32;
-        unsafe {
-            transform
-                .ProcessOutput(
+            if event_type as i32 == METransformHaveOutput.0 {
+                // Process output
+                let output_sample = unsafe {
+                    let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
+                    let buf = MFCreateMemoryBuffer(self.output_buf_size)
+                        .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
+                    sample.AddBuffer(&buf)?;
+                    sample
+                };
+
+                let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
+                    dwStreamID: self.output_stream_id,
+                    pSample: ManuallyDrop::new(Some(output_sample)),
+                    dwStatus: 0,
+                    pEvents: ManuallyDrop::new(None),
+                };
+
+                let mut output_status = 0u32;
+                match unsafe {
+                    transform.ProcessOutput(
+                        0,
+                        std::slice::from_mut(&mut output_data_buffer),
+                        &mut output_status,
+                    )
+                } {
+                    Ok(()) => {
+                        let sample_opt: Option<IMFSample> =
+                            unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
+                        if let Some(sample) = sample_opt {
+                            let flags = unsafe {
+                                sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0)
+                            };
+                            if flags == 1 {
+                                got_keyframe = true;
+                            }
+                            match unsafe { read_sample_data(&sample) } {
+                                Ok(data) => all_data.extend_from_slice(&data),
+                                Err(e) => eprintln!("[MFT] read_sample: {e}"),
+                            }
+                        }
+                    }
+                    Err(hr) => {
+                        if hr.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
+                            break;
+                        }
+                        break;
+                    }
+                }
+
+                let events: Option<IMFCollection> =
+                    unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
+                drop(events);
+            } else {
+                // Not a HaveOutput event; requeue logic not needed as we're polling
+                break;
+            }
+        }
+
+        // If no output this frame, wait for the next HaveOutput event and process it
+        if all_data.is_empty() {
+            wait_for_event(event_gen, METransformHaveOutput.0)?;
+
+            let output_sample = unsafe {
+                let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
+                let buf = MFCreateMemoryBuffer(self.output_buf_size)
+                    .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
+                sample.AddBuffer(&buf)?;
+                sample
+            };
+
+            let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: self.output_stream_id,
+                pSample: ManuallyDrop::new(Some(output_sample)),
+                dwStatus: 0,
+                pEvents: ManuallyDrop::new(None),
+            };
+
+            let mut output_status = 0u32;
+            match unsafe {
+                transform.ProcessOutput(
                     0,
                     std::slice::from_mut(&mut output_data_buffer),
                     &mut output_status,
                 )
-                .map_err(|e| format!("ProcessOutput: {e}"))?;
+            } {
+                Ok(()) => {
+                    let sample_opt: Option<IMFSample> =
+                        unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
+                    if let Some(sample) = sample_opt {
+                        let flags = unsafe {
+                            sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0)
+                        };
+                        if flags == 1 {
+                            got_keyframe = true;
+                        }
+                        match unsafe { read_sample_data(&sample) } {
+                            Ok(data) => all_data.extend_from_slice(&data),
+                            Err(e) => eprintln!("[MFT] read_sample: {e}"),
+                        }
+                    }
+                }
+                Err(e) => return Err(format!("ProcessOutput fallback: {e}").into()),
+            }
+
+            let events: Option<IMFCollection> =
+                unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
+            drop(events);
         }
 
-        let sample_opt: Option<IMFSample> =
-            unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
-        let events: Option<IMFCollection> =
-            unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
-        drop(events);
-
-        let sample = sample_opt.ok_or("no output sample from MFT")?;
-        let flags = unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) };
-        let data = unsafe { read_sample_data(&sample) }?;
-
-        if data.is_empty() {
-            return Err("empty output from encoder".into());
+        if all_data.is_empty() {
+            return Err("no output from encoder".into());
         }
 
         Ok(EncodedFrame {
-            data,
-            keyframe: flags == 1,
+            data: all_data,
+            keyframe: got_keyframe,
         })
     }
 }
