@@ -4,6 +4,7 @@ import Combine
 
 struct ContentView: View {
     @StateObject private var model = AppModel()
+    @State private var showingLogs = false
 
     var body: some View {
         Group {
@@ -14,6 +15,9 @@ struct ContentView: View {
             } else {
                 connectScreen
             }
+        }
+        .sheet(isPresented: $showingLogs) {
+            LogView(model: model)
         }
         .onAppear {
         }
@@ -61,9 +65,58 @@ struct ContentView: View {
             }
             .padding(.horizontal, 40)
 
+            Button("View connection log") {
+                showingLogs = true
+            }
+            .padding(.top, 4)
+
             Spacer()
         }
         .padding()
+    }
+}
+
+private struct LogView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if model.logs.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "doc.text")
+                            .font(.largeTitle)
+                        Text("No connection log")
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    ScrollViewReader { proxy in
+                        List(Array(model.logs.enumerated()), id: \.offset) { index, line in
+                            Text(line)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .id(index)
+                        }
+                        .onAppear {
+                            if let last = model.logs.indices.last { proxy.scrollTo(last) }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Connection Log")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Clear") { model.clearLogs() }
+                }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Copy") { UIPasteboard.general.string = model.copyableLogs() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 

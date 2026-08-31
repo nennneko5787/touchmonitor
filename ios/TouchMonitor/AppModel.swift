@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     @Published var state: NetworkClient.State = .idle
     @Published var statusText: String = ""
     @Published var videoSize: CGSize = .zero
+    @Published private(set) var logs: [String] = []
 
     /// Set by the stream view so decoded frames can be rendered.
     var onFrame: ((CVPixelBuffer) -> Void)?
@@ -35,16 +36,20 @@ final class AppModel: ObservableObject {
 
     func connect() {
         disconnectInternal()
+        logs.removeAll()
+        appendLog("Connect requested; build \(buildVersion)")
         let candidate = NetworkClient(decoder: decoder)
         candidate.onStateChange = { [weak self] newState in
             DispatchQueue.main.async {
                 self?.state = newState
                 self?.syncStateText(newState)
+                self?.appendLog("State: \(self?.stateDescription(newState) ?? "unknown")")
             }
         }
         candidate.onStatus = { [weak self] text in
             DispatchQueue.main.async {
                 self?.statusText = text
+                self?.appendLog(text)
             }
         }
         candidate.onVideoMeta = { [weak self] w, h in
@@ -68,6 +73,33 @@ final class AppModel: ObservableObject {
 
     func sendTouches(_ events: [(id: UInt8, active: Bool, x: Float, y: Float)]) {
         client?.sendTouches(events)
+    }
+
+    func clearLogs() {
+        logs.removeAll()
+    }
+
+    func copyableLogs() -> String {
+        logs.joined(separator: "\n")
+    }
+
+    private func appendLog(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        logs.append("[\(formatter.string(from: Date()))] \(message)")
+        if logs.count > 300 {
+            logs.removeFirst(logs.count - 300)
+        }
+    }
+
+    private func stateDescription(_ state: NetworkClient.State) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .failed(let reason): return "failed: \(reason)"
+        case .disconnected: return "disconnected"
+        }
     }
 
     private func syncStateText(_ newState: NetworkClient.State) {
