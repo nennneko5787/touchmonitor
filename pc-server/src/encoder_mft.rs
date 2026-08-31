@@ -2,7 +2,7 @@
 //!
 //! Hardware MFTs (Intel QSV, AMD VCN, NVIDIA NVENC) are async. We use
 //! IMFMediaEventGenerator for METransformNeedInput / METransformHaveOutput
-//! events, but with a simpler polling-based drain loop.
+//! events.
 //!
 //! Input: BGRA8 frames (from Windows Graphics Capture).
 //! Output: Annex-B H.264 access units.
@@ -60,7 +60,11 @@ fn enumerate_hw_h264_encoders() -> windows::core::Result<Vec<IMFActivate>> {
         let mut count: u32 = 0;
         MFTEnumEx(
             MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0),
+            MFT_ENUM_FLAG(
+                MFT_ENUM_FLAG_HARDWARE.0
+                    | MFT_ENUM_FLAG_ASYNCMFT.0
+                    | MFT_ENUM_FLAG_SORTANDFILTER.0,
+            ),
             None,
             Some(&output_type),
             &mut activates,
