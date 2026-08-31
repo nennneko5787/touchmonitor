@@ -64,6 +64,13 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
+      - name: Verify local-network permissions in built app
+        run: |
+          APP="$(find ~/Library/Developer/Xcode/DerivedData -type d -name 'TouchMonitor.app' -path '*Release*' | head -1)"
+          test -n "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :NSBonjourServices:0' "$APP/Info.plist" | grep -Fx '_touchmonitor._tcp'
+
       # Signing is skipped when secrets are absent, per project policy.
       - name: Repackage as .ipa (unsigned)
         run: |

@@ -44,7 +44,7 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>TouchMonitor discovers the PC over the wired USB network link.</string>
+	<string>TouchMonitor discovers and connects to the PC on your local network.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_touchmonitor._tcp</string>

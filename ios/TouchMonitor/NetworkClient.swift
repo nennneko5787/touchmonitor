@@ -47,13 +47,35 @@ class NetworkClient {
 
     func start() {
         state = .connecting
-        let browser = NWBrowser(for: .bonjour(type: "_touchmonitor._tcp", domain: nil), using: .tcp)
+        // Permit Bonjour discovery over Wi-Fi and peer-to-peer interfaces.
+        // The latter is useful for Apple-managed local links (including USB
+        // networking when the OS exposes it as a peer interface).
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        let browser = NWBrowser(for: .bonjour(type: "_touchmonitor._tcp", domain: nil), using: parameters)
         self.browser = browser
         browser.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state { self?.state = .failed(error.localizedDescription) }
+            guard let self = self else { return }
+            switch state {
+            case .ready:
+                self.onStatus?("Bonjour ready (_touchmonitor._tcp)")
+            case .failed(let error):
+                self.onStatus?("Bonjour failed: \(error.localizedDescription)")
+                self.state = .failed(error.localizedDescription)
+            case .waiting(let error):
+                self.onStatus?("Bonjour waiting: \(error.localizedDescription)")
+            case .cancelled:
+                break
+            case .setup:
+                self.onStatus?("Bonjour setup")
+            @unknown default:
+                break
+            }
         }
         browser.browseResultsChangedHandler = { [weak self] results, _ in
-            guard let self = self, self.connection == nil, let endpoint = results.first?.endpoint else { return }
+            guard let self = self else { return }
+            self.onStatus?("Bonjour services found: \(results.count)")
+            guard self.connection == nil, let endpoint = results.first?.endpoint else { return }
             self.open(endpoint: endpoint)
         }
         browser.start(queue: sendQueue)
