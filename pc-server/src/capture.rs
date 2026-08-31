@@ -186,11 +186,15 @@ impl MonitorCapture {
                     };
                     let result = extract_frame(&handler_dev, &handler_ctx, &frame);
                     let _ = frame.Close();
-                    if let Ok(captured) = result {
-                        // Drop frames if the consumer is backed up.
-                        let _ = tx.try_send(captured);
-                    } else if callback_number <= 3 {
-                        eprintln!("WGC frame extraction failed");
+                    match result {
+                        Ok(captured) => {
+                            // Drop frames if the consumer is backed up.
+                            let _ = tx.try_send(captured);
+                        }
+                        Err(error) if callback_number <= 3 => {
+                            eprintln!("WGC frame extraction failed: {error}");
+                        }
+                        Err(_) => {}
                     }
                     Ok(())
                 },
