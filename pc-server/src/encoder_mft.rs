@@ -187,17 +187,24 @@ unsafe fn read_sample_data(sample: &IMFSample) -> Result<Vec<u8>, windows::core:
 }
 
 /// Block until the next event of the desired type arrives.
-fn wait_for_event(
+fn wait_for_event_timeout(
     event_gen: &IMFMediaEventGenerator,
     expected: i32,
+    timeout: std::time::Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
     loop {
-        let event = unsafe { event_gen.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))? };
-        let event_type = unsafe { event.GetType()? } as i32;
-        if event_type == expected {
-            return Ok(());
+        let event = unsafe { event_gen.GetEvent(MF_EVENT_FLAG_NO_WAIT) };
+        if let Ok(event) = event {
+            let event_type = unsafe { event.GetType()? } as i32;
+            if event_type == expected {
+                return Ok(());
+            }
         }
-        // Unexpected event — keep waiting
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for MFT event {expected}").into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -353,10 +360,7 @@ if DEBUG {
         // Convert BGRA -> NV12
         let (y_plane, uv_plane) = bgra_to_nv12(bgra, self.width as usize, self.height as usize);
 
-        // --- 1. Wait for METransformNeedInput (blocking) ---
-        wait_for_event(event_gen, METransformNeedInput.0)?;
-
-        // --- 2. Create input sample ---
+        // --- 1. Create input sample ---
         let input_sample = unsafe {
             let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
             let mut nv12 = y_plane;
@@ -371,14 +375,14 @@ if DEBUG {
         };
         self.frame_index += 1;
 
-        // --- 3. ProcessInput ---
+        // --- 2. ProcessInput ---
         unsafe {
             transform
                 .ProcessInput(self.input_stream_id, &input_sample, 0)
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
 
-        // --- 4. Drain ALL available output (may be multiple frames) ---
+        // --- 3. Drain ALL available output (may be multiple frames) ---
         let mut all_data = Vec::new();
         let mut got_keyframe = false;
 
@@ -453,7 +457,7 @@ if DEBUG {
 
         // If no output this frame, wait for the next HaveOutput event and process it
         if all_data.is_empty() {
-            wait_for_event(event_gen, METransformHaveOutput.0)?;
+            wait_for_event_timeout(event_gen, METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
 
             let output_sample = unsafe {
                 let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
