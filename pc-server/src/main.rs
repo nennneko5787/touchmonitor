@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! touchmonitor-server
 //!
 //! PC side of the "TouchMonitor" remote-desktop-over-USB app.

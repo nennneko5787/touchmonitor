@@ -43,7 +43,7 @@ fn mf_runtime_init() -> bool {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         match MFStartup(MF_VERSION, MFSTARTUP_FULL) {
             Ok(()) => true,
-            Err(e) => {
+            Err(_e) => {
                 false
             }
         }
