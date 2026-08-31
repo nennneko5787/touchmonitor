@@ -10,7 +10,6 @@
 use std::mem::ManuallyDrop;
 use std::ptr;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::thread;
 use windows::core::{implement, Interface, Ref};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
@@ -361,9 +360,9 @@ let activate = match enumerate_hw_h264_encoders() {
                 .map_err(|e| format!("START_OF_STREAM: {e}"))?;
         }
 
-        // START_OF_STREAM causes an async encoder to queue its first
-        // METransformNeedInput event. Register the callback immediately after
-        // starting the stream so that event is delivered by the MFT queue.
+        // Register the callback after START_OF_STREAM. The async MFT then
+        // delivers the initial METransformNeedInput event through it.
+        unsafe { event_gen.BeginGetEvent(&event_callback, None::<&windows::core::IUnknown>)?; }
 if DEBUG {
             eprintln!("[MFT] encoder initialized: {}x{} @ {}fps, {}kbps", width, height, fps, bitrate_kbps);
         }
@@ -385,16 +384,24 @@ if DEBUG {
     fn wait_for_event(&self, expected: i32, timeout: std::time::Duration) -> Result<(), Box<dyn std::error::Error>> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let event_gen = self.event_gen.as_ref().ok_or("event generator not initialized")?;
-            if let Ok(event) = unsafe { event_gen.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
-                let actual = unsafe { event.GetType()? as i32 };
-                if actual == expected { return Ok(()); }
-                continue;
+            let mut guard = self.event_state.event.lock().unwrap();
+            while guard.is_none() && std::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let (next, _) = self.event_state.ready.wait_timeout(guard, remaining).unwrap();
+                guard = next;
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(format!("timed out waiting for MFT event {expected}").into());
+            let result = guard.take();
+            drop(guard);
+            let actual = match result {
+                Some(Ok(actual)) => actual,
+                Some(Err(error)) => return Err(error.into()),
+                None => return Err(format!("timed out waiting for MFT event {expected}").into()),
+            };
+            unsafe {
+                self.event_gen.as_ref().unwrap()
+                    .BeginGetEvent(&self.event_callback, None::<&windows::core::IUnknown>)?;
             }
-            thread::sleep(std::time::Duration::from_millis(1));
+            if actual == expected { return Ok(()); }
         }
     }
 
@@ -438,8 +445,7 @@ if DEBUG {
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
 
-        // Read the async MFT event queue directly. This avoids relying on a
-        // callback thread that is not dispatched reliably by some GPU drivers.
+        // Async MFT output is signalled through the callback queue.
         self.wait_for_event(METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
         let output_sample = unsafe {
             let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
