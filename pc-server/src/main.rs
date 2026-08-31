@@ -27,7 +27,9 @@ fn main() {
     let mut monitor_index: usize = 0;
     let mut bitrate_kbps: u32 = 8000;
     let mut fps: u32 = 60;
-    let mut keyframe_interval: u32 = fps;
+    // UDP is best-effort. Refresh the decoder reference image four times per
+    // second so one lost fragmented frame cannot corrupt video for a second.
+    let mut keyframe_interval: u32 = (fps / 4).max(1);
     let mut show_monitors = false;
 
     let mut args = std::env::args().skip(1);

@@ -121,23 +121,31 @@ fn handle_client(
 
 // Writer loop: capture, encode, stream.
      let mut frame_count = 0u64;
+     let mut sent_reliable_keyframe = false;
      loop {
          match capture.next_frame_timeout(Duration::from_millis(200)) {
              Ok(frame) => {
                 frame_count = frame_count.wrapping_add(1);
-                let encoded = encoder.encode_frame(&frame.bgra)?;
+                let Some(encoded) = encoder.encode_frame(&frame.bgra)? else {
+                    continue;
+                };
                 if frame_count <= 3 {
                     println!("encoded frame #{frame_count}: {} bytes, keyframe={}", encoded.data.len(), encoded.keyframe);
                 }
                 video_udp.send_frame(peer_ip, frame_count as u32, encoded.keyframe, frame.width, frame.height, &encoded.data);
-                // Keep startup functional if the UDP service endpoint is not
-                // ready yet. Once the iPad registers UDP, video uses UDP only.
-                if frame_count <= 2 && !video_udp.has_client(peer_ip) {
+                // A 1080p IDR spans many UDP datagrams. Send the initial
+                // decoder reference image reliably, then keep video on UDP.
+                let needs_tcp_keyframe = encoded.keyframe && !sent_reliable_keyframe;
+                let needs_tcp_fallback = frame_count <= 2 && !video_udp.has_client(peer_ip);
+                if needs_tcp_keyframe || needs_tcp_fallback {
                     let payload = protocol::make_video_payload(encoded.keyframe, frame.width, frame.height, &encoded.data);
                     let mut fallback = Vec::with_capacity(payload.len() + 5);
                     protocol::write_message(&mut fallback, protocol::MSG_VIDEO, &payload);
                     write_stream.write_all(&fallback)?;
-                    println!("sent TCP startup video fallback: {} bytes", fallback.len());
+                    if encoded.keyframe {
+                        sent_reliable_keyframe = true;
+                    }
+                    println!("sent TCP startup keyframe/fallback: {} bytes", fallback.len());
                 }
              }
             Err(CaptureError::Timeout) => {

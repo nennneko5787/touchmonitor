@@ -9,6 +9,7 @@
 
 use std::mem::ManuallyDrop;
 use std::ptr;
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use windows::core::{implement, Interface, Ref};
 use windows::Win32::Media::MediaFoundation::*;
@@ -25,9 +26,11 @@ pub struct MftEncoder {
     height: u32,
     fps: u32,
     output_buf_size: u32,
+    output_provides_samples: bool,
+    async_mode: bool,
     frame_index: i64,
     event_state: Arc<EventState>,
-    event_callback: IMFAsyncCallback,
+    event_callback: Option<IMFAsyncCallback>,
 }
 
 unsafe impl Send for MftEncoder {}
@@ -202,7 +205,7 @@ unsafe fn read_sample_data(sample: &IMFSample) -> Result<Vec<u8>, windows::core:
 
 /// Block until the next event of the desired type arrives.
 struct EventState {
-    event: Mutex<Option<Result<i32, String>>>,
+    events: Mutex<VecDeque<Result<i32, String>>>,
     ready: Condvar,
 }
 
@@ -231,13 +234,49 @@ impl IMFAsyncCallback_Impl for MftEventCallback_Impl {
             },
             Err(error) => Err(error.to_string()),
         };
-        *self.state.event.lock().unwrap() = Some(value);
+        self.state.events.lock().unwrap().push_back(value);
         self.state.ready.notify_one();
         Ok(())
     }
 }
 
 impl MftEncoder {
+    /// Completes the output-type handshake requested by an MFT through
+    /// MF_E_TRANSFORM_STREAM_CHANGE. Hardware drivers commonly defer this
+    /// until they have accepted the first input sample.
+    fn renegotiate_output_type(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let transform = self
+            .transform
+            .as_ref()
+            .ok_or("encoder not initialized")?
+            .clone();
+        unsafe {
+            let output_type = transform
+                .GetOutputAvailableType(self.output_stream_id, 0)
+                .map_err(|e| format!("GetOutputAvailableType after stream change: {e}"))?;
+            transform
+                .SetOutputType(self.output_stream_id, &output_type, 0)
+                .map_err(|e| format!("SetOutputType after stream change: {e}"))?;
+            let output_info = transform
+                .GetOutputStreamInfo(self.output_stream_id)
+                .map_err(|e| format!("GetOutputStreamInfo after stream change: {e}"))?;
+            self.output_provides_samples = output_info.dwFlags
+                & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+            self.output_buf_size = output_info
+                .cbSize
+                .max(self.width.saturating_mul(self.height).saturating_mul(2));
+        }
+        println!(
+            "H.264 MFT output stream renegotiated: {}",
+            if self.output_provides_samples {
+                "MFT-provided samples"
+            } else {
+                "caller-provided samples"
+            }
+        );
+        Ok(())
+    }
+
     pub fn new(
         width: u32,
         height: u32,
@@ -274,21 +313,27 @@ let activate = match enumerate_hw_h264_encoders() {
                 .map_err(|e| format!("ActivateObject: {e}"))?
         };
 
-        let event_gen: IMFMediaEventGenerator = transform
-            .cast()
-            .map_err(|e| format!("cast to IMFMediaEventGenerator: {e}"))?;
-        let event_state = Arc::new(EventState { event: Mutex::new(None), ready: Condvar::new() });
-        let event_callback: IMFAsyncCallback = MftEventCallback {
-            generator: event_gen.clone(),
-            state: Arc::clone(&event_state),
-        }.into();
-
-        unsafe {
+        let async_mode = unsafe {
             let attrs = transform
                 .GetAttributes()
                 .map_err(|e| format!("GetAttributes: {e}"))?;
             let _ = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
-        }
+            let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+            attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 0
+        };
+        let event_state = Arc::new(EventState { events: Mutex::new(VecDeque::new()), ready: Condvar::new() });
+        let (event_gen, event_callback) = if async_mode {
+            let generator: IMFMediaEventGenerator = transform
+                .cast()
+                .map_err(|e| format!("async MFT has no IMFMediaEventGenerator: {e}"))?;
+            let callback: IMFAsyncCallback = MftEventCallback {
+                generator: generator.clone(),
+                state: Arc::clone(&event_state),
+            }.into();
+            (Some(generator), Some(callback))
+        } else {
+            (None, None)
+        };
 
         unsafe {
             let output_type: IMFMediaType =
@@ -360,21 +405,36 @@ let activate = match enumerate_hw_h264_encoders() {
                 .map_err(|e| format!("START_OF_STREAM: {e}"))?;
         }
 
-        // Register the callback after START_OF_STREAM. The async MFT then
-        // delivers the initial METransformNeedInput event through it.
-        unsafe { event_gen.BeginGetEvent(&event_callback, None::<&windows::core::IUnknown>)?; }
-if DEBUG {
-            eprintln!("[MFT] encoder initialized: {}x{} @ {}fps, {}kbps", width, height, fps, bitrate_kbps);
+        let output_info = unsafe { transform.GetOutputStreamInfo(0) }
+            .map_err(|e| format!("GetOutputStreamInfo: {e}"))?;
+        let output_provides_samples = output_info.dwFlags
+            & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+        // A few hardware MFTs report cbSize=0 despite requiring a caller
+        // buffer. Keep a conservative fallback large enough for an IDR.
+        let output_buf_size = output_info
+            .cbSize
+            .max(width.saturating_mul(height).saturating_mul(2));
+
+        // Register only for MFTs that explicitly selected the asynchronous
+        // processing contract. A successful COM cast alone does not mean an
+        // encoder emits METransformNeedInput/METransformHaveOutput.
+        if let (Some(generator), Some(callback)) = (&event_gen, &event_callback) {
+            unsafe { generator.BeginGetEvent(callback, None::<&windows::core::IUnknown>)?; }
         }
+        println!("H.264 MFT negotiated: mode={}, {}x{} @ {} fps, {} kbps, output={}",
+            if async_mode { "async" } else { "sync" }, width, height, fps, bitrate_kbps,
+            if output_provides_samples { "MFT-provided samples" } else { "caller-provided samples" });
         Ok(Self {
             transform: Some(transform),
-            event_gen: Some(event_gen),
+            event_gen,
             input_stream_id: 0,
             output_stream_id: 0,
             width,
             height,
             fps,
-            output_buf_size: width * height * 2,
+            output_buf_size,
+            output_provides_samples,
+            async_mode,
             frame_index: 0,
             event_state,
             event_callback,
@@ -384,28 +444,30 @@ if DEBUG {
     fn wait_for_event(&self, expected: i32, timeout: std::time::Duration) -> Result<(), Box<dyn std::error::Error>> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let mut guard = self.event_state.event.lock().unwrap();
-            while guard.is_none() && std::time::Instant::now() < deadline {
+            let mut guard = self.event_state.events.lock().unwrap();
+            while guard.is_empty() && std::time::Instant::now() < deadline {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 let (next, _) = self.event_state.ready.wait_timeout(guard, remaining).unwrap();
                 guard = next;
             }
-            let result = guard.take();
+            let result = guard.pop_front();
             drop(guard);
             let actual = match result {
                 Some(Ok(actual)) => actual,
                 Some(Err(error)) => return Err(error.into()),
                 None => return Err(format!("timed out waiting for MFT event {expected}").into()),
             };
-            unsafe {
-                self.event_gen.as_ref().unwrap()
-                    .BeginGetEvent(&self.event_callback, None::<&windows::core::IUnknown>)?;
+            if let (Some(generator), Some(callback)) = (&self.event_gen, &self.event_callback) {
+                unsafe { generator.BeginGetEvent(callback, None::<&windows::core::IUnknown>)?; }
             }
             if actual == expected { return Ok(()); }
         }
     }
 
-    pub fn encode_frame(&mut self, bgra: &[u8]) -> Result<EncodedFrame, Box<dyn std::error::Error>> {
+    /// Returns `Ok(None)` only when a synchronous MFT has accepted input but
+    /// has not produced an access unit yet. This is normal during its initial
+    /// pipeline fill and must not disconnect the interactive stream.
+    pub fn encode_frame(&mut self, bgra: &[u8]) -> Result<Option<EncodedFrame>, Box<dyn std::error::Error>> {
         if DEBUG { eprintln!("[MFT] encode_frame called"); }
         let expected = self.width as usize * self.height as usize * 4;
         if bgra.len() != expected {
@@ -414,14 +476,17 @@ if DEBUG {
         let transform = self
             .transform
             .as_ref()
-            .ok_or("encoder not initialized")?;
+            .ok_or("encoder not initialized")?
+            .clone();
 
         // Convert BGRA -> NV12
         let (y_plane, uv_plane) = bgra_to_nv12(bgra, self.width as usize, self.height as usize);
 
         // Async MFTs advertise input capacity through METransformNeedInput.
-        // Wait with a bound so a broken driver cannot hang the server forever.
-        self.wait_for_event(METransformNeedInput.0, std::time::Duration::from_secs(1))?;
+        // Synchronous MFTs instead use the ProcessInput/ProcessOutput contract.
+        if self.async_mode {
+            self.wait_for_event(METransformNeedInput.0, std::time::Duration::from_secs(1))?;
+        }
 
         // --- 1. Create input sample ---
         let input_sample = unsafe {
@@ -445,41 +510,75 @@ if DEBUG {
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
 
-        // Async MFT output is signalled through the callback queue.
-        self.wait_for_event(METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
-        let output_sample = unsafe {
-            let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
-            let buf = MFCreateMemoryBuffer(self.output_buf_size)
-                .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
-            sample.AddBuffer(&buf)?;
-            sample
-        };
-        let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
-            dwStreamID: self.output_stream_id,
-            pSample: ManuallyDrop::new(Some(output_sample)),
-            dwStatus: 0,
-            pEvents: ManuallyDrop::new(None),
-        };
-        let mut output_status = 0u32;
-        unsafe {
-            transform.ProcessOutput(
-                0,
-                std::slice::from_mut(&mut output_data_buffer),
-                &mut output_status,
-            ).map_err(|e| format!("ProcessOutput: {e}"))?;
+        if self.async_mode {
+            self.wait_for_event(METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
         }
-        let sample = unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) }
-            .ok_or("encoder returned no output sample")?;
+        let mut output_renegotiations = 0;
+        let sample = loop {
+            let output_sample = if self.output_provides_samples {
+                None
+            } else {
+                Some(unsafe {
+                    let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
+                    let buf = MFCreateMemoryBuffer(self.output_buf_size)
+                        .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
+                    sample.AddBuffer(&buf)?;
+                    sample
+                })
+            };
+            let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: self.output_stream_id,
+                pSample: ManuallyDrop::new(output_sample),
+                dwStatus: 0,
+                pEvents: ManuallyDrop::new(None),
+            };
+            let mut output_status = 0u32;
+            let process_output = unsafe {
+                transform.ProcessOutput(
+                    0,
+                    std::slice::from_mut(&mut output_data_buffer),
+                    &mut output_status,
+                )
+            };
+            let sample = unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) }
+                .ok_or("encoder returned no output sample");
+            // ProcessOutput owns these ManuallyDrop fields. Take them even on
+            // an error so a driver error cannot leak an MFT-owned sample.
+            let events: Option<IMFCollection> =
+                unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
+            drop(events);
+            match process_output {
+                Ok(()) => break sample?,
+                Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    output_renegotiations += 1;
+                    if output_renegotiations > 2 {
+                        return Err("MFT repeatedly requested output stream renegotiation".into());
+                    }
+                    self.renegotiate_output_type()?;
+                    // The same input has an output pending. Per the MFT
+                    // contract, set the new type and call ProcessOutput again.
+                    // Async MFTs signal readiness again after that handshake;
+                    // calling ProcessOutput before the event violates their
+                    // processing contract on Intel/NVIDIA drivers.
+                    if self.async_mode {
+                        self.wait_for_event(
+                            METransformHaveOutput.0,
+                            std::time::Duration::from_secs(1),
+                        )?;
+                    }
+                }
+                Err(error) if !self.async_mode && error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(format!("ProcessOutput: {error}").into()),
+            }
+        };
         let got_keyframe = unsafe {
             sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1
         };
         let all_data = unsafe { read_sample_data(&sample) }
             .map_err(|e| format!("read encoded sample: {e}"))
             .map(|data| to_annex_b(&data))?;
-        let events: Option<IMFCollection> =
-            unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
-        drop(events);
-
         if all_data.is_empty() {
             return Err("no output from encoder".into());
         }
@@ -487,10 +586,10 @@ if DEBUG {
         if DEBUG {
             eprintln!("[MFT] encoded frame: {} bytes, keyframe={}", all_data.len(), got_keyframe);
         }
-        Ok(EncodedFrame {
+        Ok(Some(EncodedFrame {
             data: all_data,
             keyframe: got_keyframe,
-        })
+        }))
     }
 }
 
@@ -498,8 +597,8 @@ impl Drop for MftEncoder {
     fn drop(&mut self) {
         if let Some(transform) = self.transform.take() {
             unsafe {
-                let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                 let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+                let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                 let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             }
         }
@@ -521,7 +620,30 @@ pub fn is_hw_encoder_available() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bgra_to_nv12, to_annex_b};
+    use super::{bgra_to_nv12, ensure_com_initialized, is_hw_encoder_available, to_annex_b, MftEncoder};
+    use crate::capture::{MonitorCapture, MonitorCaptureConfig};
+    use std::time::Duration;
+
+    fn annex_b_nal_types(data: &[u8]) -> Vec<u8> {
+        let mut types = Vec::new();
+        let mut offset = 0;
+        while offset + 3 < data.len() {
+            let start_code_len = if data[offset..].starts_with(&[0, 0, 0, 1]) {
+                4
+            } else if data[offset..].starts_with(&[0, 0, 1]) {
+                3
+            } else {
+                offset += 1;
+                continue;
+            };
+            let nal_start = offset + start_code_len;
+            if let Some(header) = data.get(nal_start) {
+                types.push(header & 0x1f);
+            }
+            offset = nal_start;
+        }
+        types
+    }
 
     #[test]
     fn converts_avc_length_prefixes_to_annex_b() {
@@ -542,5 +664,97 @@ mod tests {
         assert_eq!(uv.len(), 2);
         assert!((uv[0] as i32 - 128).abs() <= 1);
         assert!((uv[1] as i32 - 128).abs() <= 1);
+    }
+
+    /// Exercises the production WGC -> BGRA/NV12 -> hardware MFT path.  It
+    /// deliberately checks for SPS, PPS, and an IDR, the minimum sequence the
+    /// iOS VideoToolbox decoder needs before it can render a frame.
+    #[test]
+    #[ignore = "requires a Windows desktop, a monitor, and a hardware H.264 MFT"]
+    fn hardware_mft_smoke_produces_ios_decodable_h264() {
+        // Mirror stream::handle_client: a fresh client-worker thread owns COM,
+        // WGC, and the non-Send MFT interfaces for its entire lifetime.
+        std::thread::spawn(|| {
+            assert!(is_hw_encoder_available(), "no hardware H.264 MFT is available");
+            ensure_com_initialized();
+            let monitor_index = std::env::var("TOUCHMONITOR_TEST_MONITOR")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let capture = MonitorCapture::start(
+                monitor_index,
+                MonitorCaptureConfig {
+                    buffers: 2,
+                    include_cursor: true,
+                },
+            )
+            .expect("start Windows Graphics Capture");
+
+            let mut encoder = None;
+            let mut seen_sps = false;
+            let mut seen_pps = false;
+            let mut seen_idr = false;
+            for _ in 0..120 {
+                let frame = capture
+                    .next_frame_timeout(Duration::from_secs(1))
+                    .expect("capture a desktop frame");
+                let encoder = encoder.get_or_insert_with(|| {
+                    MftEncoder::new(frame.width, frame.height, 60, 8_000, 1)
+                        .expect("initialize hardware H.264 MFT")
+                });
+                let Some(encoded) = encoder.encode_frame(&frame.bgra).expect("encode captured frame") else {
+                    continue;
+                };
+                assert!(!encoded.data.is_empty(), "MFT returned an empty access unit");
+                let types = annex_b_nal_types(&encoded.data);
+                seen_sps |= types.contains(&7);
+                seen_pps |= types.contains(&8);
+                seen_idr |= types.contains(&5);
+                if seen_sps && seen_pps && seen_idr {
+                    return;
+                }
+            }
+            panic!(
+                "hardware MFT did not emit SPS/PPS/IDR within 120 captured frames \
+                 (sps={seen_sps}, pps={seen_pps}, idr={seen_idr})"
+            );
+        })
+        .join()
+        .expect("hardware MFT smoke worker panicked");
+    }
+
+    /// Runs the actual hardware MFT without requiring access to the interactive
+    /// desktop. This is the fallback CI/agent check for the MFT contract;
+    /// `hardware_mft_smoke_produces_ios_decodable_h264` additionally verifies
+    /// the WGC source when it is run from the logged-in desktop session.
+    #[test]
+    #[ignore = "requires a hardware H.264 MFT"]
+    fn hardware_mft_encodes_synthetic_access_unit() {
+        assert!(is_hw_encoder_available(), "no hardware H.264 MFT is available");
+        ensure_com_initialized();
+        let width = 1280;
+        let height = 720;
+        let bgra = vec![0x40; width as usize * height as usize * 4];
+        let mut encoder = MftEncoder::new(width, height, 60, 8_000, 1)
+            .expect("initialize hardware H.264 MFT");
+        let mut seen_sps = false;
+        let mut seen_pps = false;
+        let mut seen_idr = false;
+        for _ in 0..8 {
+            if let Some(encoded) = encoder.encode_frame(&bgra).expect("encode synthetic frame") {
+                assert!(!encoded.data.is_empty(), "MFT returned an empty access unit");
+                let types = annex_b_nal_types(&encoded.data);
+                seen_sps |= types.contains(&7);
+                seen_pps |= types.contains(&8);
+                seen_idr |= types.contains(&5);
+                if seen_sps && seen_pps && seen_idr {
+                    return;
+                }
+            }
+        }
+        panic!(
+            "hardware MFT did not emit SPS/PPS/IDR within eight frames \
+             (sps={seen_sps}, pps={seen_pps}, idr={seen_idr})"
+        );
     }
 }

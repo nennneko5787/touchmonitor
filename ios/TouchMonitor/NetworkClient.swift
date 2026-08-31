@@ -39,6 +39,7 @@ class NetworkClient {
     /// receive queue), so it is accessed serially.
     private var readBuffer = Data()
     private var videoParts: [UInt32: (total: UInt16, keyframe: Bool, width: UInt32, height: UInt32, parts: [UInt16: Data])] = [:]
+    private var lastDeliveredVideoFrame: UInt32?
     private let sendQueue = DispatchQueue(label: "com.touchmonitor.send")
 
     init(decoder: H264Decoder) {
@@ -172,6 +173,9 @@ class NetworkClient {
             }
         case .hello:
             guard let endpoint = serverEndpoint, StreamProtocol.parseHello(payload) != nil else { return }
+            // A new server connection starts its u32 frame sequence at zero.
+            videoParts.removeAll()
+            lastDeliveredVideoFrame = nil
             let udp = NWConnection(to: endpoint, using: .udp)
             videoConnection = udp
             udp.stateUpdateHandler = { [weak self] state in
@@ -195,6 +199,13 @@ class NetworkClient {
 
     private func handleVideoDatagram(_ data: Data) {
         guard let packet = StreamProtocol.parseVideoDatagram(data) else { return }
+        // A delayed P-frame must never be decoded after a newer frame: doing
+        // so replaces the displayed reference image with stale, corrupted
+        // content and makes only moving areas appear to update.
+        if let last = lastDeliveredVideoFrame, !isNewerVideoFrame(packet.frame, than: last) {
+            videoParts.removeValue(forKey: packet.frame)
+            return
+        }
         var entry = videoParts[packet.frame] ?? (packet.total, packet.keyframe, packet.width, packet.height, [:])
         guard entry.total == packet.total else { return }
         entry.parts[packet.index] = packet.bytes
@@ -207,8 +218,18 @@ class NetworkClient {
         var accessUnit = Data()
         for index in 0..<entry.total { guard let part = entry.parts[index] else { return }; accessUnit.append(part) }
         videoParts.removeValue(forKey: packet.frame)
+        if let last = lastDeliveredVideoFrame, !isNewerVideoFrame(packet.frame, than: last) {
+            return
+        }
+        lastDeliveredVideoFrame = packet.frame
         onVideoMeta?(entry.width, entry.height)
         decoder.decode(accessUnit: accessUnit)
+    }
+
+    private func isNewerVideoFrame(_ candidate: UInt32, than previous: UInt32) -> Bool {
+        // Sequence numbers wrap; signed subtraction preserves ordering until
+        // the receiver is more than 2^31 frames behind.
+        return Int32(bitPattern: candidate &- previous) > 0
     }
 
     /// Serializes and sends a batch of touches.

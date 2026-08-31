@@ -142,22 +142,27 @@ impl MonitorCapture {
             .get(monitor_index)
             .ok_or_else(|| format!("monitor index {monitor_index} out of range ({} total)", monitors.len()))?;
 
-        let (device, context) = create_d3d_device()?;
+        let (device, context) = create_d3d_device()
+            .map_err(|error| format!("create D3D11 device for WGC: {error}"))?;
         let dxgi_device: IDXGIDevice = device.cast()?;
         let rt_device: IDirect3DDevice =
-            unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }?
-                .cast()?;
+            unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }
+                .map_err(|error| format!("create WinRT D3D11 device for WGC: {error}"))?
+                .cast()
+                .map_err(|error| format!("cast WinRT D3D11 device for WGC: {error}"))?;
 
         let interop: IGraphicsCaptureItemInterop =
             factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(bounds.hmonitor) }?;
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(bounds.hmonitor) }
+            .map_err(|error| format!("create WGC item for monitor #{monitor_index}: {error}"))?;
         let item_size = item.Size()?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &rt_device,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             cfg.buffers,
             item_size,
-        )?;
+        )
+        .map_err(|error| format!("create WGC frame pool for monitor #{monitor_index}: {error}"))?;
 
         let (tx, rx) = sync_channel::<CapturedFrame>(cfg.buffers as usize);
         let running = Arc::new(AtomicBool::new(true));
@@ -207,7 +212,9 @@ impl MonitorCapture {
         // Disable the yellow capture border so it doesn't appear in the stream.
         let _ = session.SetIsBorderRequired(false);
         let _ = session.SetIsCursorCaptureEnabled(cfg.include_cursor);
-        session.StartCapture()?;
+        session
+            .StartCapture()
+            .map_err(|error| format!("start WGC capture for monitor #{monitor_index}: {error}"))?;
 
         Ok(Self {
             _session: session,
