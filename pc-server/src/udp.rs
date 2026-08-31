@@ -24,7 +24,10 @@ impl VideoUdp {
             let mut buf = [0u8; 64];
             while !done.load(Ordering::Relaxed) {
                 if let Ok((n, from)) = s.recv_from(&mut buf) {
-                    if n >= 6 && &buf[..4] == b"TMREG" { c.lock().unwrap().insert(from.ip(), from); }
+                    if n >= 6 && &buf[..6] == b"TMREG1" {
+                        println!("video UDP client registered: {from}");
+                        c.lock().unwrap().insert(from.ip(), from);
+                    }
                 }
                 thread::sleep(std::time::Duration::from_millis(2));
             }
@@ -33,6 +36,10 @@ impl VideoUdp {
     }
 
     pub fn port(&self) -> io::Result<u16> { Ok(self.socket.local_addr()?.port()) }
+
+    pub fn has_client(&self, peer_ip: IpAddr) -> bool {
+        self.clients.lock().unwrap().contains_key(&peer_ip)
+    }
 
     pub fn send_frame(&self, peer_ip: IpAddr, frame_id: u32, keyframe: bool, width: u32, height: u32, data: &[u8]) {
         let Some(to) = self.clients.lock().unwrap().get(&peer_ip).copied() else { return };

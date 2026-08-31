@@ -121,9 +121,21 @@ fn handle_client(
      loop {
          match capture.next_frame_timeout(Duration::from_millis(200)) {
              Ok(frame) => {
-                 frame_count = frame_count.wrapping_add(1);
-                 let encoded = encoder.encode_frame(&frame.bgra)?;
-                 video_udp.send_frame(peer_ip, frame_count as u32, encoded.keyframe, frame.width, frame.height, &encoded.data);
+                frame_count = frame_count.wrapping_add(1);
+                let encoded = encoder.encode_frame(&frame.bgra)?;
+                if frame_count <= 3 {
+                    println!("encoded frame #{frame_count}: {} bytes, keyframe={}", encoded.data.len(), encoded.keyframe);
+                }
+                video_udp.send_frame(peer_ip, frame_count as u32, encoded.keyframe, frame.width, frame.height, &encoded.data);
+                // Keep startup functional if the UDP service endpoint is not
+                // ready yet. Once the iPad registers UDP, video uses UDP only.
+                if frame_count <= 2 && !video_udp.has_client(peer_ip) {
+                    let payload = protocol::make_video_payload(encoded.keyframe, frame.width, frame.height, &encoded.data);
+                    let mut fallback = Vec::with_capacity(payload.len() + 5);
+                    protocol::write_message(&mut fallback, protocol::MSG_VIDEO, &payload);
+                    write_stream.write_all(&fallback)?;
+                    println!("sent TCP startup video fallback: {} bytes", fallback.len());
+                }
              }
             Err(CaptureError::Timeout) => {
                 // Nothing new to send; keep waiting.
