@@ -30,6 +30,7 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Media_MediaFoundation",
 ]}
+windows-core = "0.61"
 bitflags = "2"
 
 [profile.release]

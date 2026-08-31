@@ -9,8 +9,8 @@
 
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::OnceLock;
-use windows::core::Interface;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use windows::core::{implement, Interface, Ref};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 
@@ -187,24 +187,58 @@ unsafe fn read_sample_data(sample: &IMFSample) -> Result<Vec<u8>, windows::core:
 }
 
 /// Block until the next event of the desired type arrives.
+struct EventState {
+    event: Mutex<Option<Result<i32, String>>>,
+    ready: Condvar,
+}
+
+#[implement(IMFAsyncCallback)]
+struct MftEventCallback {
+    generator: IMFMediaEventGenerator,
+    state: Arc<EventState>,
+}
+
+impl IMFAsyncCallback_Impl for MftEventCallback_Impl {
+    fn GetParameters(&self, flags: *mut u32, queue: *mut u32) -> windows::core::Result<()> {
+        unsafe {
+            *flags = 0;
+            *queue = 0;
+        }
+        Ok(())
+    }
+
+    fn Invoke(&self, result: Ref<'_, IMFAsyncResult>) -> windows::core::Result<()> {
+        let event = unsafe { self.generator.EndGetEvent(result.ok()?) };
+        let value = match event {
+            Ok(event) => unsafe { event.GetType() }.map(|kind| kind as i32).map_err(|e| e.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        *self.state.event.lock().unwrap() = Some(value);
+        self.state.ready.notify_one();
+        Ok(())
+    }
+}
+
 fn wait_for_event_timeout(
     event_gen: &IMFMediaEventGenerator,
     expected: i32,
     timeout: std::time::Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let event = unsafe { event_gen.GetEvent(MF_EVENT_FLAG_NO_WAIT) };
-        if let Ok(event) = event {
-            let event_type = unsafe { event.GetType()? } as i32;
-            if event_type == expected {
-                return Ok(());
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("timed out waiting for MFT event {expected}").into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+    let state = Arc::new(EventState { event: Mutex::new(None), ready: Condvar::new() });
+    let callback: IMFAsyncCallback = MftEventCallback {
+        generator: event_gen.clone(),
+        state: Arc::clone(&state),
+    }.into();
+    unsafe { event_gen.BeginGetEvent(&callback, None::<&windows::core::IUnknown>)?; }
+    let guard = state.event.lock().unwrap();
+    let (guard, wait) = state.ready.wait_timeout_while(guard, timeout, |event| event.is_none()).unwrap();
+    if wait.timed_out() && guard.is_none() {
+        return Err(format!("timed out waiting for MFT event {expected}").into());
+    }
+    match guard.as_ref().ok_or("MFT event callback returned no event")? {
+        Ok(actual) if *actual == expected => Ok(()),
+        Ok(actual) => Err(format!("unexpected MFT event {actual}, expected {expected}").into()),
+        Err(error) => Err(error.clone().into()),
     }
 }
 
