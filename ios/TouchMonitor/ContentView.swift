@@ -32,6 +32,10 @@ struct ContentView: View {
             Text("TouchMonitor")
                 .font(.largeTitle.bold())
 
+            Text("Build \(model.buildVersion)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             Text("Connect to the PC server over the USB link.")
                 .font(.subheadline)
                 .foregroundColor(.secondary)

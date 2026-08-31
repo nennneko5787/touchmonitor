@@ -27,6 +27,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
+        env:
+          TOUCHMONITOR_COMMIT: ${{ github.sha }}
         run: cargo build --release
 
       - name: Upload artifact
@@ -62,6 +64,7 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$PWD/build" \
+            TOUCHMONITOR_COMMIT="${GITHUB_SHA:0:10}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build

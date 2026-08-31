@@ -17,7 +17,10 @@ mod stream;
 mod touch;
 mod udp;
 
+const BUILD_COMMIT: &str = env!("TOUCHMONITOR_COMMIT");
+
 fn main() {
+    println!("TouchMonitor server build {BUILD_COMMIT}");
     let mut port: u16 = 5666;
     let mut monitor_index: usize = 0;
     let mut bitrate_kbps: u32 = 8000;
@@ -73,7 +76,7 @@ fn main() {
 
 fn print_help() {
     println!(
-        "touchmonitor-server\n\n\
+        "touchmonitor-server build {BUILD_COMMIT}\n\n\
          usage: touchmonitor-server [options]\n\n\
          options:\n\
          \x20 -p, --port <n>       TCP port (default: 5666)\n\

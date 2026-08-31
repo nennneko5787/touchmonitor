@@ -7,6 +7,10 @@ import Combine
 /// exposes connection state for the SwiftUI layer.
 final class AppModel: ObservableObject {
 
+    var buildVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+    }
+
     @Published var state: NetworkClient.State = .idle
     @Published var statusText: String = ""
     @Published var videoSize: CGSize = .zero
