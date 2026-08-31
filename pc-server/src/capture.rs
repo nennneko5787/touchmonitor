@@ -10,6 +10,7 @@
 
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::atomic::AtomicU32;
 
 use windows::core::{factory, BOOL, Interface, IInspectable};
 use windows::Foundation::TypedEventHandler;
@@ -160,24 +161,36 @@ impl MonitorCapture {
 
         let (tx, rx) = sync_channel::<CapturedFrame>(cfg.buffers as usize);
         let running = Arc::new(AtomicBool::new(true));
+        let callback_count = Arc::new(AtomicU32::new(0));
 
         let handler_dev = device.clone();
         let handler_ctx = context.clone();
+        let handler_count = Arc::clone(&callback_count);
 
         let frame_arrived_token = pool.FrameArrived(
             &TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
                 move |pool, _| {
+                    let callback_number = handler_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if callback_number <= 3 {
+                        println!("WGC FrameArrived callback #{callback_number}");
+                    }
                     let Some(pool) = pool.as_ref() else {
                         return Ok(());
                     };
-                    let Ok(frame) = pool.TryGetNextFrame() else {
-                        return Ok(());
+                    let frame = match pool.TryGetNextFrame() {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            if callback_number <= 3 { eprintln!("WGC TryGetNextFrame failed: {error}"); }
+                            return Ok(());
+                        }
                     };
                     let result = extract_frame(&handler_dev, &handler_ctx, &frame);
                     let _ = frame.Close();
                     if let Ok(captured) = result {
                         // Drop frames if the consumer is backed up.
                         let _ = tx.try_send(captured);
+                    } else if callback_number <= 3 {
+                        eprintln!("WGC frame extraction failed");
                     }
                     Ok(())
                 },
