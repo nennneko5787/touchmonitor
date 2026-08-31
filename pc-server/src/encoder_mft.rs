@@ -360,6 +360,10 @@ if DEBUG {
         // Convert BGRA -> NV12
         let (y_plane, uv_plane) = bgra_to_nv12(bgra, self.width as usize, self.height as usize);
 
+        // Async MFTs advertise input capacity through METransformNeedInput.
+        // Wait with a bound so a broken driver cannot hang the server forever.
+        wait_for_event_timeout(event_gen, METransformNeedInput.0, std::time::Duration::from_secs(1))?;
+
         // --- 1. Create input sample ---
         let input_sample = unsafe {
             let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
