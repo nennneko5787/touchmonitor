@@ -39,7 +39,3 @@ On the target Windows machine, verify all of the following:
 - no `timed out waiting for MFT event 602` occurs.
 
 If `Invoke` is not entered, inspect COM apartment/thread initialization and callback lifetime before changing the frame pipeline. If the selected MFT reports `MF_TRANSFORM_ASYNC = 0`, do not wait for events; implement the synchronous MFT path instead.
-
-## Commit discipline
-
-Do not commit this pending change merely because compilation succeeds. Commit only after the Windows test above passes, then update `implementation-status.md` with the result and the exact tested commit.
