@@ -29,6 +29,7 @@ class NetworkClient {
     private var videoConnection: NWConnection?
     private var serverEndpoint: NWEndpoint?
     private var browser: NWBrowser?
+    private var usbListener: NWListener?
     private let decoder: H264Decoder
 
     /// Periodic keep-alive so the PC server can see the client->server path is
@@ -83,11 +84,61 @@ class NetworkClient {
         browser.start(queue: sendQueue)
     }
 
+    /// Starts the USB transport. The iOS app listens only on loopback; the PC
+    /// side exposes that socket through usbmuxd/iproxy. This avoids Bonjour and
+    /// does not require the PC's network address to be known by the app.
+    func startUSB() {
+        stop()
+        state = .connecting
+
+        do {
+            let parameters = NWParameters.tcp
+            parameters.requiredInterfaceType = .loopback
+            guard let port = NWEndpoint.Port(rawValue: 5666) else {
+                throw NSError(domain: "TouchMonitor", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid USB listener port"])
+            }
+            let listener = try NWListener(using: parameters, on: port)
+            usbListener = listener
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    self?.onStatus?("USB listener ready (127.0.0.1:5666)")
+                case .failed(let error):
+                    self?.onStatus?("USB listener failed: \(error.localizedDescription)")
+                    self?.state = .failed(error.localizedDescription)
+                case .waiting(let error):
+                    self?.onStatus?("USB listener waiting: \(error.localizedDescription)")
+                case .cancelled:
+                    break
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self = self else { return }
+                if self.connection != nil {
+                    connection.cancel()
+                    return
+                }
+                self.onStatus?("USB connection accepted")
+                self.attach(connection: connection, endpointDescription: "USB/usbmuxd")
+            }
+            listener.start(queue: sendQueue)
+        } catch {
+            onStatus?("USB listener setup failed: \(error.localizedDescription)")
+            state = .failed(error.localizedDescription)
+        }
+    }
+
     private func open(endpoint: NWEndpoint) {
         serverEndpoint = endpoint
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
         let connection = NWConnection(to: endpoint, using: parameters)
+        attach(connection: connection, endpointDescription: endpoint.debugDescription)
+    }
+
+    private func attach(connection: NWConnection, endpointDescription: String) {
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] newState in
             guard let self = self else { return }
@@ -97,7 +148,7 @@ class NetworkClient {
             case .preparing:
                 self.onStatus?("TCP resolving service endpoint")
             case .ready:
-                self.onStatus?("TCP ready")
+                self.onStatus?("TCP ready (\(endpointDescription))")
                 self.state = .connected
                 self.startPingTimer()
                 self.receiveLoop()
@@ -118,6 +169,8 @@ class NetworkClient {
         stopPingTimer()
         browser?.cancel()
         browser = nil
+        usbListener?.cancel()
+        usbListener = nil
         connection?.cancel()
         connection = nil
         videoConnection?.cancel()
@@ -172,17 +225,23 @@ class NetworkClient {
                 onStatus?(text)
             }
         case .hello:
-            guard let endpoint = serverEndpoint, StreamProtocol.parseHello(payload) != nil else { return }
+            guard let videoPort = StreamProtocol.parseHello(payload) else { return }
             // A new server connection starts its u32 frame sequence at zero.
             videoParts.removeAll()
             lastDeliveredVideoFrame = nil
-            let udp = NWConnection(to: endpoint, using: .udp)
-            videoConnection = udp
-            udp.stateUpdateHandler = { [weak self] state in
-                if case .ready = state { self?.receiveVideoLoop() }
+            if videoPort == 0 {
+                // USB/usbmuxd mode: the server deliberately advertises port 0
+                // because video is carried as framed MSG_VIDEO TCP messages.
+                onStatus?("USB hello received; video uses TCP")
+            } else if let endpoint = serverEndpoint {
+                let udp = NWConnection(to: endpoint, using: .udp)
+                videoConnection = udp
+                udp.stateUpdateHandler = { [weak self] state in
+                    if case .ready = state { self?.receiveVideoLoop() }
+                }
+                udp.start(queue: sendQueue)
+                udp.send(content: Data([0x54, 0x4D, 0x52, 0x45, 0x47, 0x31]), completion: .contentProcessed { _ in })
             }
-            udp.start(queue: sendQueue)
-            udp.send(content: Data([0x54, 0x4D, 0x52, 0x45, 0x47, 0x31]), completion: .contentProcessed { _ in })
         case .touch, .ping:
             break
         }

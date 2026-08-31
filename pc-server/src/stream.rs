@@ -46,7 +46,7 @@ pub fn run_server(
         let video_udp_for_client = video_udp.clone();
 
         std::thread::spawn(move || {
-            if let Err(e) = handle_client(stream, monitor_index, fps, bitrate_kbps, keyframe_interval, video_udp_for_client, video_port) {
+            if let Err(e) = handle_client(stream, monitor_index, fps, bitrate_kbps, keyframe_interval, Some(video_udp_for_client), video_port) {
                 eprintln!("client {peer} error: {e}");
             }
             println!("client disconnected: {peer}");
@@ -56,13 +56,23 @@ pub fn run_server(
     Ok(())
 }
 
+pub fn handle_client_usb(
+    stream: TcpStream,
+    monitor_index: usize,
+    fps: u32,
+    bitrate_kbps: u32,
+    keyframe_interval: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    handle_client(stream, monitor_index, fps, bitrate_kbps, keyframe_interval, None, 0)
+}
+
 fn handle_client(
     stream: TcpStream,
     monitor_index: usize,
     fps: u32,
     bitrate_kbps: u32,
     keyframe_interval: u32,
-    video_udp: VideoUdp,
+    video_udp: Option<VideoUdp>,
     video_port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     crate::encoder_mft::ensure_com_initialized();
@@ -132,12 +142,16 @@ fn handle_client(
                 if frame_count <= 3 {
                     println!("encoded frame #{frame_count}: {} bytes, keyframe={}", encoded.data.len(), encoded.keyframe);
                 }
-                video_udp.send_frame(peer_ip, frame_count as u32, encoded.keyframe, frame.width, frame.height, &encoded.data);
-                // A 1080p IDR spans many UDP datagrams. Send the initial
-                // decoder reference image reliably, then keep video on UDP.
+                if let Some(video_udp) = &video_udp {
+                    video_udp.send_frame(peer_ip, frame_count as u32, encoded.keyframe, frame.width, frame.height, &encoded.data);
+                }
+                // USB/usbmuxd has no UDP path, so every frame uses the existing
+                // framed TCP MSG_VIDEO message. This also provides a reliable
+                // startup keyframe without needing a second transport.
+                let needs_tcp_video = video_udp.is_none();
                 let needs_tcp_keyframe = encoded.keyframe && !sent_reliable_keyframe;
-                let needs_tcp_fallback = frame_count <= 2 && !video_udp.has_client(peer_ip);
-                if needs_tcp_keyframe || needs_tcp_fallback {
+                let needs_tcp_fallback = video_udp.as_ref().is_some_and(|udp| frame_count <= 2 && !udp.has_client(peer_ip));
+                if needs_tcp_video || needs_tcp_keyframe || needs_tcp_fallback {
                     let payload = protocol::make_video_payload(encoded.keyframe, frame.width, frame.height, &encoded.data);
                     let mut fallback = Vec::with_capacity(payload.len() + 5);
                     protocol::write_message(&mut fallback, protocol::MSG_VIDEO, &payload);

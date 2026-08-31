@@ -18,6 +18,7 @@ mod service;
 mod stream;
 mod touch;
 mod udp;
+mod usb;
 
 const BUILD_COMMIT: &str = env!("TOUCHMONITOR_COMMIT");
 
@@ -30,6 +31,7 @@ fn main() {
     // UDP is best-effort. Refresh the decoder reference image four times per
     // second so one lost fragmented frame cannot corrupt video for a second.
     let mut keyframe_interval: u32 = (fps / 4).max(1);
+    let mut usb = false;
     let mut show_monitors = false;
 
     let mut args = std::env::args().skip(1);
@@ -47,6 +49,7 @@ fn main() {
             }
             "--fps" => fps = args.next().and_then(|s| s.parse().ok()).unwrap_or(fps),
             "--keyframe-interval" => keyframe_interval = args.next().and_then(|s| s.parse().ok()).unwrap_or(keyframe_interval),
+            "--usb" => usb = true,
             "--list-monitors" => show_monitors = true,
             "--help" | "-h" => {
                 print_help();
@@ -72,7 +75,12 @@ fn main() {
         return;
     }
 
-    if let Err(e) = stream::run_server("0.0.0.0", port, monitor_index, fps, bitrate_kbps, keyframe_interval) {
+    let result = if usb {
+        usb::run_server(port, monitor_index, fps, bitrate_kbps, keyframe_interval)
+    } else {
+        stream::run_server("0.0.0.0", port, monitor_index, fps, bitrate_kbps, keyframe_interval)
+    };
+    if let Err(e) = result {
         eprintln!("server error: {e}");
         std::process::exit(1);
     }
@@ -87,6 +95,7 @@ fn print_help() {
          \x20 -m, --monitor <n>    monitor index to stream (default: 0)\n\
          \x20 -b, --bitrate <n>    H.264 bitrate in kbps (default: 8000)\n\
          \x20     --fps <n>        encode frame rate (default: 60)\n\
+         \x20     --usb            use usbmuxd/iproxy USB transport\n\
          \x20     --list-monitors  list connected monitors with their sizes\n\
          \x20 -h, --help           show this help"
     );

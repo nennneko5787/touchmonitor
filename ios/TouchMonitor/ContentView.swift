@@ -53,9 +53,9 @@ struct ContentView: View {
             }
 
             Button {
-                model.connect()
+                model.connectUSB()
             } label: {
-                Text("Connect")
+                Text("Connect over USB")
                     .fontWeight(.semibold)
                     .frame(maxWidth: .infinity)
                     .padding()
@@ -64,6 +64,11 @@ struct ContentView: View {
                     .cornerRadius(12)
             }
             .padding(.horizontal, 40)
+
+            Button("Connect over network") {
+                model.connect()
+            }
+            .padding(.top, 4)
 
             Button("View connection log") {
                 showingLogs = true

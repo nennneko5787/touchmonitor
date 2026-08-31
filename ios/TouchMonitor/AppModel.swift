@@ -61,6 +61,33 @@ final class AppModel: ObservableObject {
         candidate.start()
     }
 
+    func connectUSB() {
+        disconnectInternal()
+        logs.removeAll()
+        appendLog("USB connect requested; build \(buildVersion)")
+        let candidate = NetworkClient(decoder: decoder)
+        candidate.onStateChange = { [weak self] newState in
+            DispatchQueue.main.async {
+                self?.state = newState
+                self?.syncStateText(newState)
+                self?.appendLog("State: \(self?.stateDescription(newState) ?? "unknown")")
+            }
+        }
+        candidate.onStatus = { [weak self] text in
+            DispatchQueue.main.async {
+                self?.statusText = text
+                self?.appendLog(text)
+            }
+        }
+        candidate.onVideoMeta = { [weak self] w, h in
+            DispatchQueue.main.async {
+                self?.videoSize = CGSize(width: CGFloat(w), height: CGFloat(h))
+            }
+        }
+        client = candidate
+        candidate.startUSB()
+    }
+
     func disconnect() {
         disconnectInternal()
         state = .disconnected

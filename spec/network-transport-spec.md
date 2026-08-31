@@ -17,6 +17,14 @@
 - UDP video uses the resolved peer address and the port from hello.
 - TCP disconnect must stop the writer loop and unregister the UDP client.
 
+## USB transport
+
+- The PC starts `iproxy <host-port>:<device-port>` from libusbmuxd and connects to the host-local proxy endpoint.
+- The iOS app listens on `127.0.0.1:5666` using the loopback interface only.
+- The USB connection carries the same framed TCP control/touch messages and `MSG_VIDEO` H.264 access units.
+- USB mode does not start or depend on the UDP video socket.
+- The host-side proxy port is separate from the server's normal network listening port so the two modes can share the same configured device port.
+
 ## Required diagnostics
 
 The server must log, in order:

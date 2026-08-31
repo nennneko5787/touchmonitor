@@ -32,6 +32,18 @@ The server build must have no warnings caused by the changed code. `cargo check`
 4. Test center, four corners, a drag, and a two-finger gesture.
 5. Disconnect and reconnect twice.
 
+## USB manual test
+
+1. Connect the iPad to Windows with USB and ensure the device is trusted/paired.
+2. Ensure `iproxy.exe` from libusbmuxd is installed and available on `PATH`.
+3. Run `cargo run --release -- --usb --monitor 1`.
+4. Confirm the server log reports the usbmuxd/iproxy mapping and an established iOS connection.
+5. In the iPad app, choose `Connect over USB` and confirm the USB listener, hello, first TCP video frame, decoder initialization, and visible video in the log.
+6. Test center, four corners, a drag, and a two-finger gesture.
+7. Disconnect and reconnect twice without restarting the server or app.
+
+USB acceptance requires at least one non-zero `MSG_VIDEO` frame and visible video; a successful usbmuxd tunnel with no decoded frame is a failed test.
+
 ## H.264-specific acceptance
 
 For each input frame the encoder must obey the selected MFT's processing model:

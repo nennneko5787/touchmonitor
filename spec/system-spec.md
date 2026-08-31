@@ -19,11 +19,19 @@ The PC server owns monitor capture, H.264 encoding, service advertisement, video
 7. Touch events use normalized coordinates and persistent finger IDs; the server injects them into the selected monitor.
 8. A disconnect releases the capture, encoder, sockets, and touch state without requiring a reboot.
 
+### USB wired transport
+
+9. USB mode uses usbmuxd/libusbmuxd to expose an iOS localhost TCP listener to the PC; it must not require a PC IP address or Bonjour discovery.
+10. The iOS app listens on loopback only in USB mode, and the PC uses `iproxy` to forward a host-local TCP port to that listener.
+11. USB video uses the existing framed TCP `MSG_VIDEO` path because usbmuxd forwards TCP and does not provide the UDP path used by the Wi-Fi transport.
+12. USB mode must retain the same H.264 payload, hello, touch, and disconnect semantics as the network transport.
+
 ## Non-goals
 
 - Manual IP entry as the normal connection path.
 - Requiring a special Ethernet adapter for the baseline Wi-Fi path.
 - Calling a successful TCP connection a successful video connection.
+- Using UDP as the USB video transport.
 
 ## End-to-end acceptance criteria
 
