@@ -22,7 +22,12 @@ pub struct Advertisement {
 
 pub fn advertise(port: u16) -> Result<Advertisement, Box<dyn std::error::Error>> {
     let instance_name: Vec<u16> = "TouchMonitor._touchmonitor._tcp.local.\0".encode_utf16().collect();
-    let host_name: Vec<u16> = "touchmonitor.local.\0".encode_utf16().collect();
+    let computer_name = std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "touchmonitor".to_owned());
+    let host_name_text = format!("{computer_name}.local.");
+    let host_name: Vec<u16> = format!("{host_name_text}\0").encode_utf16().collect();
     let ip = local_ipv4().unwrap_or(Ipv4Addr::new(127, 0, 0, 1));
     // IP4_ADDRESS is stored in network byte order. `from_ne_bytes` keeps the
     // octets in the same order in memory on Windows, whereas `from_be_bytes`
@@ -56,6 +61,7 @@ pub fn advertise(port: u16) -> Result<Advertisement, Box<dyn std::error::Error>>
     if status != 9506u32 { // DNS_REQUEST_PENDING
         return Err(format!("DnsServiceRegister failed: {status}").into());
     }
+    println!("Bonjour advertisement: TouchMonitor._touchmonitor._tcp.local. -> {host_name_text} ({ip}:{port})");
     Ok(Advertisement { request, instance_name, host_name, instance: boxed_instance, ip4, cancel })
 }
 
