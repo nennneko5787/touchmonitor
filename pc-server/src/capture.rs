@@ -12,7 +12,7 @@ use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use windows::core::{factory, BOOL, Interface, IInspectable};
-use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::{
     Capture::{
         Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -111,7 +111,7 @@ pub struct MonitorCapture {
     _session: GraphicsCaptureSession,
     _pool: Direct3D11CaptureFramePool,
     _item: GraphicsCaptureItem,
-    _frame_arrived_token: EventRegistrationToken,
+    _frame_arrived_token: i64,
     rx: Receiver<CapturedFrame>,
     running: Arc<AtomicBool>,
     bounds: MonitorBounds,
