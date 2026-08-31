@@ -7,6 +7,10 @@ use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::Dns::*;
 
+unsafe extern "system" fn registration_complete(status: u32, _context: *const c_void, _instance: *const DNS_SERVICE_INSTANCE) {
+    if status != 0 { eprintln!("Bonjour registration callback failed: {status}"); }
+}
+
 pub struct Advertisement {
     request: DNS_SERVICE_REGISTER_REQUEST,
     instance_name: Vec<u16>,
@@ -40,13 +44,15 @@ pub fn advertise(port: u16) -> Result<Advertisement, Box<dyn std::error::Error>>
         Version: 1,
         InterfaceIndex: 0,
         pServiceInstance: &mut *boxed_instance,
-        pRegisterCompletionCallback: None,
+        pRegisterCompletionCallback: Some(registration_complete),
         pQueryContext: ptr::null_mut::<c_void>(),
         hCredentials: HANDLE::default(),
         unicastEnabled: BOOL(0),
     };
     let status = unsafe { DnsServiceRegister(&request, Some(&mut cancel)) };
-    if status != 0 { return Err(format!("DnsServiceRegister failed: {status}").into()); }
+    if status != 9506u32 { // DNS_REQUEST_PENDING
+        return Err(format!("DnsServiceRegister failed: {status}").into());
+    }
     Ok(Advertisement { request, instance_name, host_name, instance: boxed_instance, ip4, cancel })
 }
 
