@@ -343,10 +343,6 @@ let activate = match enumerate_hw_h264_encoders() {
                 .map_err(|e| format!("SetInputType: {e}"))?;
         }
 
-        // Register after unlocking/configuring the async MFT and before
-        // START_OF_STREAM, so the initial METransformNeedInput cannot be lost.
-        unsafe { event_gen.BeginGetEvent(&event_callback, None::<&windows::core::IUnknown>)?; }
-
         unsafe {
             transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
@@ -355,6 +351,11 @@ let activate = match enumerate_hw_h264_encoders() {
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
                 .map_err(|e| format!("START_OF_STREAM: {e}"))?;
         }
+
+        // START_OF_STREAM causes an async encoder to queue its first
+        // METransformNeedInput event. Register the callback immediately after
+        // starting the stream so that event is delivered by the MFT queue.
+        unsafe { event_gen.BeginGetEvent(&event_callback, None::<&windows::core::IUnknown>)?; }
 
 if DEBUG {
             eprintln!("[MFT] encoder initialized: {}x{} @ {}fps, {}kbps", width, height, fps, bitrate_kbps);
