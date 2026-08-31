@@ -2,6 +2,11 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=TOUCHMONITOR_COMMIT");
+    // The fallback below reads Git directly. Tell Cargo about the files that
+    // change when a new commit is checked out, otherwise it may reuse an old
+    // binary and keep displaying the previous commit ID.
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/index");
     let commit = std::env::var("TOUCHMONITOR_COMMIT")
         .ok()
         .filter(|value| !value.is_empty())
