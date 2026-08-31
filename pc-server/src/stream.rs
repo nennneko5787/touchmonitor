@@ -65,6 +65,7 @@ fn handle_client(
     video_udp: VideoUdp,
     video_port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    crate::encoder_mft::ensure_com_initialized();
     let cfg = MonitorCaptureConfig {
         buffers: 2,
         include_cursor: true,

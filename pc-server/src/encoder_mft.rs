@@ -51,6 +51,14 @@ fn mf_runtime_init() -> bool {
     })
 }
 
+/// COM initialization is per-thread. The encoder is created on the client
+/// worker thread, not on the thread that accepts the socket.
+pub fn ensure_com_initialized() {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+}
+
 fn enumerate_hw_h264_encoders() -> windows::core::Result<Vec<IMFActivate>> {
     unsafe {
         let output_type = MFT_REGISTER_TYPE_INFO {
