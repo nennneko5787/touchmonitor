@@ -20,6 +20,7 @@ type DeallocateFn = unsafe extern "system" fn(ServiceRef);
 const NO_ERROR: DnsError = 0;
 const CLASS_IN: u16 = 1;
 const TYPE_A: u16 = 1;
+const FLAGS_UNIQUE: u32 = 0x08;
 
 unsafe extern "system" fn register_callback(_: ServiceRef, _: u32, error: DnsError, _: *const c_char, _: *const c_char, _: *const c_char, _: *mut c_void) {
     if error != NO_ERROR { eprintln!("Bonjour service registration callback failed: {error}"); }
@@ -74,7 +75,7 @@ unsafe fn register(module: HMODULE, port: u16) -> Result<(ServiceRef, ServiceRef
     if error != NO_ERROR { deallocate(service); return Err(format!("DNSServiceCreateConnection failed: {error}")); }
     let address = ip.octets();
     let mut record: RecordRef = std::ptr::null_mut();
-    let error = register_record(records, &mut record, 0, 0, host_bytes.as_ptr() as _, TYPE_A, CLASS_IN, address.len() as u16, address.as_ptr() as _, 120, Some(record_callback), std::ptr::null_mut());
+    let error = register_record(records, &mut record, FLAGS_UNIQUE, 0, host_bytes.as_ptr() as _, TYPE_A, CLASS_IN, address.len() as u16, address.as_ptr() as _, 120, Some(record_callback), std::ptr::null_mut());
     if error != NO_ERROR {
         deallocate(records);
         deallocate(service);
