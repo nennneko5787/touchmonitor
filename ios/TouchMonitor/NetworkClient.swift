@@ -76,6 +76,7 @@ class NetworkClient {
             guard let self = self else { return }
             self.onStatus?("Bonjour services found: \(results.count)")
             guard self.connection == nil, let endpoint = results.first?.endpoint else { return }
+            self.onStatus?("Opening TCP endpoint: \(endpoint.debugDescription)")
             self.open(endpoint: endpoint)
         }
         browser.start(queue: sendQueue)
@@ -83,23 +84,30 @@ class NetworkClient {
 
     private func open(endpoint: NWEndpoint) {
         serverEndpoint = endpoint
-        let connection = NWConnection(to: endpoint, using: .tcp)
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        let connection = NWConnection(to: endpoint, using: parameters)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] newState in
             guard let self = self else { return }
             switch newState {
+            case .setup:
+                self.onStatus?("TCP setup")
+            case .preparing:
+                self.onStatus?("TCP resolving service endpoint")
             case .ready:
+                self.onStatus?("TCP ready")
                 self.state = .connected
                 self.startPingTimer()
                 self.receiveLoop()
             case .failed(let error):
+                self.onStatus?("TCP failed: \(error.localizedDescription)")
                 self.state = .failed(error.localizedDescription)
             case .cancelled:
+                self.onStatus?("TCP cancelled")
                 self.state = .disconnected
             case .waiting(let error):
-                self.onStatus?("Waiting... \(error.localizedDescription)")
-            default:
-                break
+                self.onStatus?("TCP waiting: \(error.localizedDescription)")
             }
         }
         connection.start(queue: sendQueue)
