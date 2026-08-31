@@ -13,8 +13,10 @@ pub struct Advertisement { stop: Arc<AtomicBool>, thread: Option<JoinHandle<()>>
 pub fn advertise(port: u16) -> io::Result<Advertisement> {
     let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let ip = local_ipv4(&probe).unwrap_or(Ipv4Addr::new(127, 0, 0, 1));
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 5353))?;
-    let _ = socket.join_multicast_v4(&GROUP, &Ipv4Addr::UNSPECIFIED);
+    // Do not bind 5353: Windows commonly already has an mDNS responder
+    // (Bonjour/mDNSResponder) listening there. An ephemeral UDP source port
+    // is valid for unsolicited mDNS announcements and coexists with it.
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.set_multicast_ttl_v4(255)?;
     socket.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -22,13 +24,11 @@ pub fn advertise(port: u16) -> io::Result<Advertisement> {
     let thread = thread::spawn(move || {
         let packet = response_packet(port, ip);
         let mut last = std::time::Instant::now() - Duration::from_secs(31);
-        let mut buf = [0u8; 1500];
         while !stop_thread.load(Ordering::Relaxed) {
-            if last.elapsed() >= Duration::from_secs(30) {
+            if last.elapsed() >= Duration::from_secs(5) {
                 let _ = socket.send_to(&packet, SocketAddrV4::new(GROUP, 5353));
                 last = std::time::Instant::now();
             }
-            if socket.recv_from(&mut buf).is_ok() { let _ = socket.send_to(&packet, SocketAddrV4::new(GROUP, 5353)); }
             thread::sleep(Duration::from_millis(100));
         }
     });
