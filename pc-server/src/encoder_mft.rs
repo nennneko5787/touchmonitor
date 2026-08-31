@@ -26,6 +26,8 @@ pub struct MftEncoder {
     fps: u32,
     output_buf_size: u32,
     frame_index: i64,
+    event_state: Arc<EventState>,
+    event_callback: IMFAsyncCallback,
 }
 
 unsafe impl Send for MftEncoder {}
@@ -282,6 +284,12 @@ let activate = match enumerate_hw_h264_encoders() {
         let event_gen: IMFMediaEventGenerator = transform
             .cast()
             .map_err(|e| format!("cast to IMFMediaEventGenerator: {e}"))?;
+        let event_state = Arc::new(EventState { event: Mutex::new(None), ready: Condvar::new() });
+        let event_callback: IMFAsyncCallback = MftEventCallback {
+            generator: event_gen.clone(),
+            state: Arc::clone(&event_state),
+        }.into();
+        unsafe { event_gen.BeginGetEvent(&event_callback, None::<&windows::core::IUnknown>)?; }
 
         unsafe {
             let attrs = transform
@@ -373,7 +381,30 @@ if DEBUG {
             fps,
             output_buf_size: width * height * 2,
             frame_index: 0,
+            event_state,
+            event_callback,
         })
+    }
+
+    fn wait_for_event(&self, expected: i32, timeout: std::time::Duration) -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let mut guard = self.event_state.event.lock().unwrap();
+            while guard.is_none() && std::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let (next, _) = self.event_state.ready.wait_timeout(guard, remaining).unwrap();
+                guard = next;
+            }
+            let result = guard.take();
+            drop(guard);
+            let actual = match result {
+                Some(Ok(actual)) => actual,
+                Some(Err(error)) => return Err(error.into()),
+                None => return Err(format!("timed out waiting for MFT event {expected}").into()),
+            };
+            unsafe { self.event_gen.as_ref().unwrap().BeginGetEvent(&self.event_callback, None::<&windows::core::IUnknown>)?; }
+            if actual == expected { return Ok(()); }
+        }
     }
 
     pub fn encode_frame(&mut self, bgra: &[u8]) -> Result<EncodedFrame, Box<dyn std::error::Error>> {
@@ -396,7 +427,7 @@ if DEBUG {
 
         // Async MFTs advertise input capacity through METransformNeedInput.
         // Wait with a bound so a broken driver cannot hang the server forever.
-        wait_for_event_timeout(event_gen, METransformNeedInput.0, std::time::Duration::from_secs(1))?;
+        self.wait_for_event(METransformNeedInput.0, std::time::Duration::from_secs(1))?;
 
         // --- 1. Create input sample ---
         let input_sample = unsafe {
@@ -495,7 +526,7 @@ if DEBUG {
 
         // If no output this frame, wait for the next HaveOutput event and process it
         if all_data.is_empty() {
-            wait_for_event_timeout(event_gen, METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
+            self.wait_for_event(METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
 
             let output_sample = unsafe {
                 let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
