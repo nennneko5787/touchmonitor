@@ -210,37 +210,18 @@ impl IMFAsyncCallback_Impl for MftEventCallback_Impl {
     }
 
     fn Invoke(&self, result: Ref<'_, IMFAsyncResult>) -> windows::core::Result<()> {
-        let event = unsafe { self.generator.EndGetEvent(result.ok()?) };
-        let value = match event {
-            Ok(event) => unsafe { event.GetType() }.map(|kind| kind as i32).map_err(|e| e.to_string()),
+        let value = match result.ok() {
+            Ok(result) => match unsafe { self.generator.EndGetEvent(result) } {
+                Ok(event) => unsafe { event.GetType() }
+                    .map(|kind| kind as i32)
+                    .map_err(|e| e.to_string()),
+                Err(error) => Err(error.to_string()),
+            },
             Err(error) => Err(error.to_string()),
         };
         *self.state.event.lock().unwrap() = Some(value);
         self.state.ready.notify_one();
         Ok(())
-    }
-}
-
-fn wait_for_event_timeout(
-    event_gen: &IMFMediaEventGenerator,
-    expected: i32,
-    timeout: std::time::Duration,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state = Arc::new(EventState { event: Mutex::new(None), ready: Condvar::new() });
-    let callback: IMFAsyncCallback = MftEventCallback {
-        generator: event_gen.clone(),
-        state: Arc::clone(&state),
-    }.into();
-    unsafe { event_gen.BeginGetEvent(&callback, None::<&windows::core::IUnknown>)?; }
-    let guard = state.event.lock().unwrap();
-    let (guard, wait) = state.ready.wait_timeout_while(guard, timeout, |event| event.is_none()).unwrap();
-    if wait.timed_out() && guard.is_none() {
-        return Err(format!("timed out waiting for MFT event {expected}").into());
-    }
-    match guard.as_ref().ok_or("MFT event callback returned no event")? {
-        Ok(actual) if *actual == expected => Ok(()),
-        Ok(actual) => Err(format!("unexpected MFT event {actual}, expected {expected}").into()),
-        Err(error) => Err(error.clone().into()),
     }
 }
 
@@ -289,7 +270,6 @@ let activate = match enumerate_hw_h264_encoders() {
             generator: event_gen.clone(),
             state: Arc::clone(&event_state),
         }.into();
-        unsafe { event_gen.BeginGetEvent(&event_callback, None::<&windows::core::IUnknown>)?; }
 
         unsafe {
             let attrs = transform
@@ -359,6 +339,10 @@ let activate = match enumerate_hw_h264_encoders() {
                 .map_err(|e| format!("SetInputType: {e}"))?;
         }
 
+        // Register after unlocking/configuring the async MFT and before
+        // START_OF_STREAM, so the initial METransformNeedInput cannot be lost.
+        unsafe { event_gen.BeginGetEvent(&event_callback, None::<&windows::core::IUnknown>)?; }
+
         unsafe {
             transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
@@ -417,10 +401,6 @@ if DEBUG {
             .transform
             .as_ref()
             .ok_or("encoder not initialized")?;
-        let event_gen = self
-            .event_gen
-            .as_ref()
-            .ok_or("event generator not initialized")?;
 
         // Convert BGRA -> NV12
         let (y_plane, uv_plane) = bgra_to_nv12(bgra, self.width as usize, self.height as usize);
@@ -451,129 +431,41 @@ if DEBUG {
                 .map_err(|e| format!("ProcessInput: {e}"))?;
         }
 
-        // --- 3. Drain ALL available output (may be multiple frames) ---
-        let mut all_data = Vec::new();
-        let mut got_keyframe = false;
-
-        loop {
-            // Non-blocking poll for METransformHaveOutput
-            let event = unsafe {
-                match event_gen.GetEvent(MF_EVENT_FLAG_NO_WAIT) {
-                    Ok(e) => e,
-                    Err(_) => break, // No more events, done
-                }
-            };
-
-            let event_type = unsafe { event.GetType().unwrap_or(0) };
-
-            if event_type as i32 == METransformHaveOutput.0 {
-                // Process output
-                let output_sample = unsafe {
-                    let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
-                    let buf = MFCreateMemoryBuffer(self.output_buf_size)
-                        .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
-                    sample.AddBuffer(&buf)?;
-                    sample
-                };
-
-                let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
-                    dwStreamID: self.output_stream_id,
-                    pSample: ManuallyDrop::new(Some(output_sample)),
-                    dwStatus: 0,
-                    pEvents: ManuallyDrop::new(None),
-                };
-
-                let mut output_status = 0u32;
-                match unsafe {
-                    transform.ProcessOutput(
-                        0,
-                        std::slice::from_mut(&mut output_data_buffer),
-                        &mut output_status,
-                    )
-                } {
-                    Ok(()) => {
-                        let sample_opt: Option<IMFSample> =
-                            unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
-                        if let Some(sample) = sample_opt {
-                            let flags = unsafe {
-                                sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0)
-                            };
-                            if flags == 1 {
-                                got_keyframe = true;
-                            }
-                            match unsafe { read_sample_data(&sample) } {
-                                Ok(data) => all_data.extend_from_slice(&to_annex_b(&data)),
-                                Err(e) => {}
-                            }
-                        }
-                    }
-                    Err(hr) => {
-                        if hr.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
-                            break;
-                        }
-                        break;
-                    }
-                }
-
-                let events: Option<IMFCollection> =
-                    unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
-                drop(events);
-            } else {
-                // Not a HaveOutput event; requeue logic not needed as we're polling
-                break;
-            }
+        // Async MFT output is signalled through the same callback. Do not mix
+        // GetEvent polling with BeginGetEvent; polling consumes/reorders events.
+        self.wait_for_event(METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
+        let output_sample = unsafe {
+            let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
+            let buf = MFCreateMemoryBuffer(self.output_buf_size)
+                .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
+            sample.AddBuffer(&buf)?;
+            sample
+        };
+        let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
+            dwStreamID: self.output_stream_id,
+            pSample: ManuallyDrop::new(Some(output_sample)),
+            dwStatus: 0,
+            pEvents: ManuallyDrop::new(None),
+        };
+        let mut output_status = 0u32;
+        unsafe {
+            transform.ProcessOutput(
+                0,
+                std::slice::from_mut(&mut output_data_buffer),
+                &mut output_status,
+            ).map_err(|e| format!("ProcessOutput: {e}"))?;
         }
-
-        // If no output this frame, wait for the next HaveOutput event and process it
-        if all_data.is_empty() {
-            self.wait_for_event(METransformHaveOutput.0, std::time::Duration::from_secs(1))?;
-
-            let output_sample = unsafe {
-                let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
-                let buf = MFCreateMemoryBuffer(self.output_buf_size)
-                    .map_err(|e| format!("MFCreateMemoryBuffer: {e}"))?;
-                sample.AddBuffer(&buf)?;
-                sample
-            };
-
-            let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: self.output_stream_id,
-                pSample: ManuallyDrop::new(Some(output_sample)),
-                dwStatus: 0,
-                pEvents: ManuallyDrop::new(None),
-            };
-
-            let mut output_status = 0u32;
-            match unsafe {
-                transform.ProcessOutput(
-                    0,
-                    std::slice::from_mut(&mut output_data_buffer),
-                    &mut output_status,
-                )
-            } {
-                Ok(()) => {
-                    let sample_opt: Option<IMFSample> =
-                        unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) };
-                    if let Some(sample) = sample_opt {
-                        let flags = unsafe {
-                            sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0)
-                        };
-                        if flags == 1 {
-                            got_keyframe = true;
-                        }
-                        match unsafe { read_sample_data(&sample) } {
-                            Ok(data) => all_data.extend_from_slice(&to_annex_b(&data)),
-                            Err(e) => {}
-                        }
-                    }
-                }
-                Err(e) => return Err(format!("ProcessOutput fallback: {e}").into()),
-            }
-
-            let events: Option<IMFCollection> =
-                unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
-            drop(events);
-        }
+        let sample = unsafe { ManuallyDrop::take(&mut output_data_buffer.pSample) }
+            .ok_or("encoder returned no output sample")?;
+        let got_keyframe = unsafe {
+            sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1
+        };
+        let all_data = unsafe { read_sample_data(&sample) }
+            .map_err(|e| format!("read encoded sample: {e}"))
+            .map(|data| to_annex_b(&data))?;
+        let events: Option<IMFCollection> =
+            unsafe { ManuallyDrop::take(&mut output_data_buffer.pEvents) };
+        drop(events);
 
         if all_data.is_empty() {
             return Err("no output from encoder".into());
