@@ -12,7 +12,7 @@ type RecordRef = *mut c_void;
 type DnsError = i32;
 type RegisterFn = unsafe extern "system" fn(*mut ServiceRef, u32, u32, *const c_char, *const c_char, *const c_char, *const c_char, u16, u16, *const c_void, Option<unsafe extern "system" fn()>, *mut c_void) -> DnsError;
 type CreateConnectionFn = unsafe extern "system" fn(*mut ServiceRef) -> DnsError;
-type RegisterRecordFn = unsafe extern "system" fn(ServiceRef, *mut RecordRef, u32, *const c_char, u16, u16, u16, *const c_void, u32, Option<unsafe extern "system" fn()>, *mut c_void) -> DnsError;
+type RegisterRecordFn = unsafe extern "system" fn(ServiceRef, *mut RecordRef, u32, u32, *const c_char, u16, u16, u16, *const c_void, u32, Option<unsafe extern "system" fn()>, *mut c_void) -> DnsError;
 type DeallocateFn = unsafe extern "system" fn(ServiceRef);
 
 const NO_ERROR: DnsError = 0;
@@ -63,7 +63,7 @@ unsafe fn register(module: HMODULE, port: u16) -> Result<(ServiceRef, ServiceRef
     if error != NO_ERROR { deallocate(service); return Err(format!("DNSServiceCreateConnection failed: {error}")); }
     let address = ip.octets();
     let mut record: RecordRef = std::ptr::null_mut();
-    let error = register_record(records, &mut record, 0, host_bytes.as_ptr() as _, TYPE_A, CLASS_IN, address.len() as u16, address.as_ptr() as _, 120, None, std::ptr::null_mut());
+    let error = register_record(records, &mut record, 0, 0, host_bytes.as_ptr() as _, TYPE_A, CLASS_IN, address.len() as u16, address.as_ptr() as _, 120, None, std::ptr::null_mut());
     if error != NO_ERROR {
         deallocate(records);
         deallocate(service);
