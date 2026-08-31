@@ -76,7 +76,9 @@ fn handle_client(
         bounds.width, bounds.height, bounds.left, bounds.top
     );
 
+    println!("initializing H.264 MFT encoder...");
     let mut encoder = MftEncoder::new(bounds.width, bounds.height, fps, bitrate_kbps, keyframe_interval)?;
+    println!("H.264 MFT encoder initialized");
     let mapping = ScreenMapping {
         width: bounds.width,
         height: bounds.height,
