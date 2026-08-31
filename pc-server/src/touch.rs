@@ -257,18 +257,23 @@ impl TouchInjector {
             for (id, active, x01, y01) in events {
                 let tid = *id as u32;
                 // Monitor-relative coordinates: (0,0) is the captured monitor's top-left.
-                let x = (*x01 * mapping.width as f32) as i32;
-                let y = (*y01 * mapping.height as f32) as i32;
+                // Treat network coordinates as untrusted input. Clamping here
+                // prevents NaN/out-of-range values from becoming invalid Win32
+                // pointer coordinates at the edge of a monitor.
+                let nx = if x01.is_finite() { x01.clamp(0.0, 1.0) } else { 0.0 };
+                let ny = if y01.is_finite() { y01.clamp(0.0, 1.0) } else { 0.0 };
+                let x = (nx * mapping.width.saturating_sub(1) as f32).round() as i32;
+                let y = (ny * mapping.height.saturating_sub(1) as f32).round() as i32;
 
                 let prev = state.iter().find(|s| s.0 == tid);
                 let (prev_active, prev_x, prev_y) = match prev {
                     Some(s) => (s.3, s.1, s.2),
-                    None => (false, *x01, *y01),
+                    None => (false, nx, ny),
                 };
 
                 let flags = if *active && !prev_active {
                     POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
-                } else if *active && (prev_x != *x01 || prev_y != *y01) {
+                } else if *active && (prev_x != nx || prev_y != ny) {
                     POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
                 } else if !*active && prev_active {
                     POINTER_FLAG_UP
@@ -301,11 +306,11 @@ impl TouchInjector {
 
                 // update bookkeeping
                 if let Some(s) = state.iter_mut().find(|s| s.0 == tid) {
-                    s.1 = *x01;
-                    s.2 = *y01;
+                    s.1 = nx;
+                    s.2 = ny;
                     s.3 = *active;
                 } else {
-                    state.push((tid, *x01, *y01, *active));
+                    state.push((tid, nx, ny, *active));
                 }
             }
         }

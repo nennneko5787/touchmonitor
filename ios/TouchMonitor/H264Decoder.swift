@@ -5,8 +5,8 @@ import CoreVideo
 
 /// Decodes the H.264 (Annex-B / Baseline) stream coming from the PC server.
 ///
-/// The PC prepends SPS/PPS on every keyframe. Each `MSG_VIDEO` payload therefore
-/// carries one complete Annex-B access unit. We split it into NAL units, rebuild
+/// Each UDP video frame carries one complete Annex-B access unit. We split it
+/// into NAL units, rebuild
 /// the parameter set (and decompression session) whenever SPS/PPS change, and feed
 /// VCL units (IDR / P slices) to a `VTDecompressionSession`. Decoded frames are
 /// delivered on a background queue via `onDecodedFrame`.
@@ -21,6 +21,9 @@ final class H264Decoder {
     private var pps: Data?
 
     private let queue = DispatchQueue(label: "com.touchmonitor.h264decoder")
+    private let pendingLock = NSLock()
+    private var pendingAccessUnit: Data?
+    private var decodeScheduled = false
 
     deinit {
         if let session = session {
@@ -30,7 +33,27 @@ final class H264Decoder {
 
     /// Feed one Annex-B access unit (from a `MSG_VIDEO` payload).
     func decode(accessUnit: Data) {
-        queue.async { [self] in
+        pendingLock.lock()
+        pendingAccessUnit = accessUnit
+        let schedule = !decodeScheduled
+        decodeScheduled = true
+        pendingLock.unlock()
+        guard schedule else { return }
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            while true {
+                self.pendingLock.lock()
+                let next = self.pendingAccessUnit
+                self.pendingAccessUnit = nil
+                if next == nil { self.decodeScheduled = false }
+                self.pendingLock.unlock()
+                guard let next = next else { return }
+                self.decodeOne(accessUnit: next)
+            }
+        }
+    }
+
+    private func decodeOne(accessUnit: Data) {
             let nalus = H264NAL.splitAnnexB(accessUnit)
             var didChangeParams = false
             var vclUnits: [Data] = []
@@ -88,7 +111,6 @@ final class H264Decoder {
                 frameRefcon: nil,
                 infoFlagsOut: &infoFlags
             )
-        }
     }
 
     private func rebuildSession(sps: Data, pps: Data) {

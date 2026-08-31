@@ -10,7 +10,6 @@ name = "touchmonitor-server"
 path = "src/main.rs"
 
 [dependencies]
-openh264 = { version = "0.9", features = ["source"] }
 windows = { version = "0.61", features = [
     "Foundation",
     "Graphics_Capture",

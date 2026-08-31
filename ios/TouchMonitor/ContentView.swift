@@ -5,9 +5,6 @@ import Combine
 struct ContentView: View {
     @StateObject private var model = AppModel()
 
-    @State private var host: String = "192.168.42.1"
-    @State private var port: String = "5666"
-
     var body: some View {
         Group {
             if model.isConnected {
@@ -19,8 +16,6 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            host = model.host
-            port = String(model.port)
         }
         .onDisappear {
             model.disconnect()
@@ -41,24 +36,6 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundColor(.secondary)
 
-            VStack(spacing: 12) {
-                TextField("Host", text: $host)
-                    .textContentType(.URL)
-                    .keyboardType(.numbersAndPunctuation)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-                    .padding(12)
-                    .background(Color(.secondarySystemBackground))
-                    .cornerRadius(10)
-
-                TextField("Port", text: $port)
-                    .keyboardType(.numberPad)
-                    .padding(12)
-                    .background(Color(.secondarySystemBackground))
-                    .cornerRadius(10)
-            }
-            .padding(.horizontal, 40)
-
             if !model.statusText.isEmpty {
                 Text(model.statusText)
                     .font(.footnote)
@@ -68,8 +45,6 @@ struct ContentView: View {
             }
 
             Button {
-                model.host = host
-                model.port = UInt16(port) ?? 5666
                 model.connect()
             } label: {
                 Text("Connect")

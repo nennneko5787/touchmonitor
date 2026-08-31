@@ -5,43 +5,29 @@
 //!   * a reader thread receives multitouch messages and injects them into Windows.
 
 use crate::capture::{CaptureError, MonitorCapture, MonitorCaptureConfig};
-use crate::encoder::H264Encoder;
-use crate::encoder_mft::{self, MftEncoder};
+use crate::encoder_mft::MftEncoder;
 use crate::protocol;
 use crate::touch::{ScreenMapping, TouchInjector};
+use crate::udp::VideoUdp;
 use std::io::Write;
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-enum Encoder {
-    Mft(MftEncoder),
-    OpenH264(H264Encoder),
-}
-
-impl Encoder {
-    fn encode_frame(&mut self, bgra: &[u8]) -> Result<crate::encoder::EncodedFrame, Box<dyn std::error::Error>> {
-        match self {
-            Encoder::Mft(enc) => {
-                let frame = enc.encode_frame(bgra)?;
-                Ok(crate::encoder::EncodedFrame {
-                    data: frame.data,
-                    keyframe: frame.keyframe,
-                })
-            }
-            Encoder::OpenH264(enc) => enc.encode_frame(bgra),
-        }
-    }
-}
-
 pub fn run_server(
-    bind: &str,
+    _bind: &str,
     port: u16,
     monitor_index: usize,
     fps: u32,
     bitrate_kbps: u32,
+    keyframe_interval: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind((bind, port))?;
-    println!("touchmonitor-server listening on {bind}:{port}");
+    let listener = TcpListener::bind(("0.0.0.0", port))?;
+    // TCP and UDP may share a port number. This lets the Bonjour endpoint be
+    // reused for both transports without exposing a second port to the client.
+    let video_udp = VideoUdp::bind(port)?;
+    let video_port = video_udp.port()?;
+    let _advertisement = crate::service::advertise(port)?;
+    println!("touchmonitor-server ready; discover via Bonjour _touchmonitor._tcp on the USB link (port {port})");
     println!("streaming monitor #{monitor_index} @ {fps} fps, {bitrate_kbps} kbps (USB link)");
 
     for stream in listener.incoming() {
@@ -57,9 +43,10 @@ pub fn run_server(
         }
         let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
         println!("client connected: {peer}");
+        let video_udp_for_client = video_udp.clone();
 
         std::thread::spawn(move || {
-            if let Err(e) = handle_client(stream, monitor_index, fps, bitrate_kbps) {
+            if let Err(e) = handle_client(stream, monitor_index, fps, bitrate_kbps, keyframe_interval, video_udp_for_client, video_port) {
                 eprintln!("client {peer} error: {e}");
             }
             println!("client disconnected: {peer}");
@@ -74,6 +61,9 @@ fn handle_client(
     monitor_index: usize,
     fps: u32,
     bitrate_kbps: u32,
+    keyframe_interval: u32,
+    video_udp: VideoUdp,
+    video_port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = MonitorCaptureConfig {
         buffers: 2,
@@ -86,9 +76,7 @@ fn handle_client(
         bounds.width, bounds.height, bounds.left, bounds.top
     );
 
-let mut encoder = {
-         Encoder::Mft(MftEncoder::new(bounds.width as u32, bounds.height as u32, fps, bitrate_kbps)?)
-     };
+    let mut encoder = MftEncoder::new(bounds.width, bounds.height, fps, bitrate_kbps, keyframe_interval)?;
     let mapping = ScreenMapping {
         width: bounds.width,
         height: bounds.height,
@@ -98,6 +86,8 @@ let mut encoder = {
 
     // Split the TCP stream for concurrent read/write.
     let mut write_stream = stream.try_clone()?;
+    let peer_ip: IpAddr = stream.peer_addr()?.ip();
+    write_stream.write_all(&protocol::make_hello(video_port))?;
     let mut reader = stream;
 
 // Reader thread: touch messages in, inject into Windows.
@@ -112,8 +102,6 @@ let mut encoder = {
              match msg {
                  protocol::MSG_TOUCH => {
                      if let Some(events) = protocol::decode_touch(&payload) {
-                         let first = events.first().map(|e| format!("id={} a={} x={:.2} y={:.2}", e.0, e.1, e.2, e.3)).unwrap_or_default();
-                         // println!("touch: {} events [{}]", events.len(), first);
                          match injector.apply_and_send(&events, &mapping) {
                              Ok(()) => {}
                              Err(e) => eprintln!("touch inject error: {e:?}"),
@@ -129,26 +117,13 @@ let mut encoder = {
      });
 
 // Writer loop: capture, encode, stream.
-     let mut out = Vec::new();
      let mut frame_count = 0u64;
      loop {
          match capture.next_frame_timeout(Duration::from_millis(200)) {
              Ok(frame) => {
-                 frame_count += 1;
-                 // if frame_count % 60 == 0 {
-                 //     eprintln!("[stream] encoding frame {}", frame_count);
-                 // }
+                 frame_count = frame_count.wrapping_add(1);
                  let encoded = encoder.encode_frame(&frame.bgra)?;
-                 out.clear();
-                 let payload = protocol::make_video_payload(
-                     encoded.keyframe,
-                     frame.width,
-                     frame.height,
-                     &encoded.data,
-                 );
-                 protocol::write_message(&mut out, protocol::MSG_VIDEO, &payload);
-                 write_stream.write_all(&out)?;
-                 write_stream.flush()?;
+                 video_udp.send_frame(peer_ip, frame_count as u32, encoded.keyframe, frame.width, frame.height, &encoded.data);
              }
             Err(CaptureError::Timeout) => {
                 // Nothing new to send; keep waiting.

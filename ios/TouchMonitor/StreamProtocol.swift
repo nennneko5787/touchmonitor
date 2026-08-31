@@ -17,6 +17,25 @@ enum StreamProtocol {
 
     static let maxMessageLength = 16 * 1024 * 1024
 
+    static func parseHello(_ payload: Data) -> UInt16? {
+        guard payload.count >= 2 else { return nil }
+        return UInt16(payload[0]) | (UInt16(payload[1]) << 8)
+    }
+
+    /// UDP video packet: TMV1, frame id, chunk index/count, keyframe, size, bytes.
+    static func parseVideoDatagram(_ data: Data) -> (frame: UInt32, index: UInt16, total: UInt16, keyframe: Bool, width: UInt32, height: UInt32, bytes: Data)? {
+        guard data.count >= 21, data[0] == 0x54, data[1] == 0x4D, data[2] == 0x56, data[3] == 0x31 else { return nil }
+        let frame = data.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self)) }
+        let index = data.withUnsafeBytes { UInt16(littleEndian: $0.loadUnaligned(fromByteOffset: 8, as: UInt16.self)) }
+        let total = data.withUnsafeBytes { UInt16(littleEndian: $0.loadUnaligned(fromByteOffset: 10, as: UInt16.self)) }
+        let keyframe = data[12] != 0
+        let width = data.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 13, as: UInt32.self)) }
+        let height = data.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 17, as: UInt32.self)) }
+        guard total > 0, index < total else { return nil }
+        let bytes = data.count > 21 ? Data(data[21...]) : Data()
+        return (frame, index, total, keyframe, width, height, bytes)
+    }
+
     /// Serializes one `MSG_TOUCH` message, ready to write to the socket.
     ///
     /// `events` is an array of `(id, active, x01, y01)` where `x01`/`y01` are

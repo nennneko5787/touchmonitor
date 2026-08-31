@@ -14,6 +14,8 @@ use windows::core::Interface;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 
+const DEBUG: bool = false;
+
 pub struct MftEncoder {
     transform: Option<IMFTransform>,
     event_gen: Option<IMFMediaEventGenerator>,
@@ -21,7 +23,9 @@ pub struct MftEncoder {
     output_stream_id: u32,
     width: u32,
     height: u32,
+    fps: u32,
     output_buf_size: u32,
+    frame_index: i64,
 }
 
 unsafe impl Send for MftEncoder {}
@@ -134,6 +138,27 @@ fn bgra_to_nv12(bgra: &[u8], width: usize, height: usize) -> (Vec<u8>, Vec<u8>) 
     (y_plane, uv_plane)
 }
 
+/// MFT H.264 encoders are allowed to return either Annex-B or AVC
+/// length-prefixed NAL units. Normalize both forms before handing bytes to
+/// VideoToolbox. This is important: feeding AVC bytes as Annex-B produces a
+/// decoder that stays black without reporting a useful error.
+fn to_annex_b(data: &[u8]) -> Vec<u8> {
+    if data.windows(4).any(|w| w == [0, 0, 0, 1]) || data.windows(3).any(|w| w == [0, 0, 1]) {
+        return data.to_vec();
+    }
+    let mut out = Vec::with_capacity(data.len() + 32);
+    let mut pos = 0;
+    while pos + 4 <= data.len() {
+        let len = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        pos += 4;
+        if len == 0 || pos + len > data.len() { return data.to_vec(); }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(&data[pos..pos + len]);
+        pos += len;
+    }
+    if pos != data.len() || out.is_empty() { data.to_vec() } else { out }
+}
+
 unsafe fn fill_buffer(buf: &IMFMediaBuffer, data: &[u8]) -> Result<(), windows::core::Error> {
     let mut ptr = std::ptr::null_mut();
     let mut max_len = 0u32;
@@ -182,24 +207,30 @@ impl MftEncoder {
         height: u32,
         fps: u32,
         bitrate_kbps: u32,
+        keyframe_interval: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        if width < 2 || height < 2 || width % 2 != 0 || height % 2 != 0 || fps == 0 {
+            return Err("MFT encoder requires positive even dimensions and non-zero FPS".into());
+        }
         if !mf_runtime_init() {
             return Err("Media Foundation runtime init failed".into());
         }
 
 let activate = match enumerate_hw_h264_encoders() {
-             Ok(hw) if !hw.is_empty() => {
-                 hw.into_iter().next().unwrap()
-             }
-             _ => {
-                 let sw = enumerate_sw_h264_encoders()
-                     .map_err(|e| format!("enumerate SW encoders: {e}"))?;
-                 if sw.is_empty() {
-                     return Err("no H.264 encoder MFT found".into());
-                 }
-                 sw.into_iter().next().unwrap()
-             }
-         };
+              Ok(hw) if !hw.is_empty() => {
+                  if DEBUG { eprintln!("[MFT] using hardware H.264 encoder"); }
+                  hw.into_iter().next().unwrap()
+              }
+              _ => {
+                  let sw = enumerate_sw_h264_encoders()
+                      .map_err(|e| format!("enumerate SW encoders: {e}"))?;
+                  if sw.is_empty() {
+                      return Err("no H.264 encoder MFT found".into());
+                  }
+                  if DEBUG { eprintln!("[MFT] using software H.264 encoder"); }
+                  sw.into_iter().next().unwrap()
+              }
+          };
 
         let transform: IMFTransform = unsafe {
             activate
@@ -243,11 +274,9 @@ let activate = match enumerate_hw_h264_encoders() {
                         .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)
                 })
                 .and_then(|()| {
-                    // Keyframe every frame (IDR only) to ensure immediate decodability.
-                    // This solves the "black on connect" issue by guaranteeing the first frame
-                    // is an IDR with SPS/PPS. Adjust to a higher value (e.g., fps) for better
-                    // compression once streaming is stable.
-                    output_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 1)
+                    // Avoid the bandwidth and latency cost of making every
+                    // frame an IDR while keeping reconnect time short.
+                    output_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, keyframe_interval.max(1))
                 })
                 .map_err(|e| format!("set output type attrs: {e}"))?;
             transform
@@ -290,18 +319,28 @@ let activate = match enumerate_hw_h264_encoders() {
                 .map_err(|e| format!("START_OF_STREAM: {e}"))?;
         }
 
-Ok(Self {
-                 transform: Some(transform),
-                 event_gen: Some(event_gen),
-                 input_stream_id: 0,
-                 output_stream_id: 0,
-                 width,
-                 height,
-                 output_buf_size: width * height * 2,
-             })
+if DEBUG {
+            eprintln!("[MFT] encoder initialized: {}x{} @ {}fps, {}kbps", width, height, fps, bitrate_kbps);
+        }
+        Ok(Self {
+            transform: Some(transform),
+            event_gen: Some(event_gen),
+            input_stream_id: 0,
+            output_stream_id: 0,
+            width,
+            height,
+            fps,
+            output_buf_size: width * height * 2,
+            frame_index: 0,
+        })
     }
 
     pub fn encode_frame(&mut self, bgra: &[u8]) -> Result<EncodedFrame, Box<dyn std::error::Error>> {
+        if DEBUG { eprintln!("[MFT] encode_frame called"); }
+        let expected = self.width as usize * self.height as usize * 4;
+        if bgra.len() != expected {
+            return Err(format!("BGRA frame has {} bytes, expected {}", bgra.len(), expected).into());
+        }
         let transform = self
             .transform
             .as_ref()
@@ -320,16 +359,17 @@ Ok(Self {
         // --- 2. Create input sample ---
         let input_sample = unsafe {
             let sample = MFCreateSample().map_err(|e| format!("MFCreateSample: {e}"))?;
-            let y_buf = MFCreateMemoryBuffer(y_plane.len() as u32)
-                .map_err(|e| format!("MFCreateMemoryBuffer Y: {e}"))?;
-            fill_buffer(&y_buf, &y_plane).map_err(|e| format!("fill Y: {e}"))?;
-            sample.AddBuffer(&y_buf)?;
-            let uv_buf = MFCreateMemoryBuffer(uv_plane.len() as u32)
-                .map_err(|e| format!("MFCreateMemoryBuffer UV: {e}"))?;
-            fill_buffer(&uv_buf, &uv_plane).map_err(|e| format!("fill UV: {e}"))?;
-            sample.AddBuffer(&uv_buf)?;
+            let mut nv12 = y_plane;
+            nv12.extend_from_slice(&uv_plane);
+            let buf = MFCreateMemoryBuffer(nv12.len() as u32)
+                .map_err(|e| format!("MFCreateMemoryBuffer NV12: {e}"))?;
+            fill_buffer(&buf, &nv12).map_err(|e| format!("fill NV12: {e}"))?;
+            sample.AddBuffer(&buf)?;
+            sample.SetSampleTime(self.frame_index * 10_000_000i64 / self.fps as i64)?;
+            sample.SetSampleDuration(10_000_000i64 / self.fps as i64)?;
             sample
         };
+        self.frame_index += 1;
 
         // --- 3. ProcessInput ---
         unsafe {
@@ -389,7 +429,7 @@ Ok(Self {
                                 got_keyframe = true;
                             }
                             match unsafe { read_sample_data(&sample) } {
-                                Ok(data) => all_data.extend_from_slice(&data),
+                                Ok(data) => all_data.extend_from_slice(&to_annex_b(&data)),
                                 Err(e) => {}
                             }
                         }
@@ -449,7 +489,7 @@ Ok(Self {
                             got_keyframe = true;
                         }
                         match unsafe { read_sample_data(&sample) } {
-                            Ok(data) => all_data.extend_from_slice(&data),
+                            Ok(data) => all_data.extend_from_slice(&to_annex_b(&data)),
                             Err(e) => {}
                         }
                     }
@@ -466,6 +506,9 @@ Ok(Self {
             return Err("no output from encoder".into());
         }
 
+        if DEBUG {
+            eprintln!("[MFT] encoded frame: {} bytes, keyframe={}", all_data.len(), got_keyframe);
+        }
         Ok(EncodedFrame {
             data: all_data,
             keyframe: got_keyframe,
@@ -477,8 +520,8 @@ impl Drop for MftEncoder {
     fn drop(&mut self) {
         if let Some(transform) = self.transform.take() {
             unsafe {
-                let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
                 let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+                let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
                 let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             }
         }
@@ -496,4 +539,30 @@ pub fn is_hw_encoder_available() -> bool {
             Err(_) => false,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bgra_to_nv12, to_annex_b};
+
+    #[test]
+    fn converts_avc_length_prefixes_to_annex_b() {
+        let avc = [0, 0, 0, 3, 0x65, 1, 2, 0, 0, 0, 2, 0x06, 7];
+        assert_eq!(to_annex_b(&avc), vec![0,0,0,1,0x65,1,2,0,0,0,1,0x06,7]);
+    }
+
+    #[test]
+    fn keeps_annex_b_unchanged() {
+        let annex_b = [0, 0, 0, 1, 0x67, 1, 2];
+        assert_eq!(to_annex_b(&annex_b), annex_b);
+    }
+
+    #[test]
+    fn bgra_nv12_has_expected_layout_and_neutral_chroma() {
+        let (y, uv) = bgra_to_nv12(&[0, 0, 0, 0, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 0], 2, 2);
+        assert_eq!(y.len(), 4);
+        assert_eq!(uv.len(), 2);
+        assert!((uv[0] as i32 - 128).abs() <= 1);
+        assert!((uv[1] as i32 - 128).abs() <= 1);
+    }
 }

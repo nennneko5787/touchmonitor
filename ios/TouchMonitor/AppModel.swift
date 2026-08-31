@@ -24,10 +24,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Hosts that the user may type; uses a TextField on the connect screen.
-    var host: String = "192.168.42.1"
-    var port: UInt16 = 5666
-
     var isConnected: Bool {
         if case .connected = state { return true }
         return false
@@ -35,10 +31,7 @@ final class AppModel: ObservableObject {
 
     func connect() {
         disconnectInternal()
-        guard let candidate = NetworkClient(host: host, port: port, decoder: decoder) else {
-            state = .failed("Bad host/port")
-            return
-        }
+        let candidate = NetworkClient(decoder: decoder)
         candidate.onStateChange = { [weak self] newState in
             DispatchQueue.main.async {
                 self?.state = newState
@@ -76,7 +69,7 @@ final class AppModel: ObservableObject {
     private func syncStateText(_ newState: NetworkClient.State) {
         switch newState {
         case .connected:
-            statusText = "Connected to \(host):\(port)"
+            statusText = "Connected over USB"
         case .failed(let reason):
             statusText = "Failed: \(reason)"
         case .disconnected:

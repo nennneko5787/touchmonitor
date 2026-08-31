@@ -4,7 +4,7 @@ import Network
 /// Owns the TCP connection to the PC server and pumps protocol messages.
 ///
 /// * A receive loop accumulates bytes and pops framed messages (`StreamProtocol`).
-/// * `MSG_VIDEO` payloads are forwarded to the `H264Decoder`.
+/// * TCP carries touch/control traffic; video arrives as best-effort UDP.
 /// * `MSG_INFO` strings are surfaced via `onStatus`.
 /// * Multitouch is sent with `sendTouches(_:)`.
 class NetworkClient {
@@ -25,7 +25,10 @@ class NetworkClient {
     var onStatus: ((String) -> Void)?
     var onVideoMeta: ((UInt32, UInt32) -> Void)?
 
-    private let connection: NWConnection
+    private var connection: NWConnection?
+    private var videoConnection: NWConnection?
+    private var serverEndpoint: NWEndpoint?
+    private var browser: NWBrowser?
     private let decoder: H264Decoder
 
     /// Periodic keep-alive so the PC server can see the client->server path is
@@ -35,17 +38,31 @@ class NetworkClient {
     /// All reads/writes of `readBuffer` happen on `sendQueue` (the connection's
     /// receive queue), so it is accessed serially.
     private var readBuffer = Data()
+    private var videoParts: [UInt32: (total: UInt16, keyframe: Bool, width: UInt32, height: UInt32, parts: [UInt16: Data])] = [:]
     private let sendQueue = DispatchQueue(label: "com.touchmonitor.send")
 
-    init?(host: String, port: UInt16, decoder: H264Decoder) {
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return nil }
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
-        self.connection = NWConnection(to: endpoint, using: .tcp)
+    init(decoder: H264Decoder) {
         self.decoder = decoder
     }
 
     func start() {
         state = .connecting
+        let browser = NWBrowser(for: .bonjour(type: "_touchmonitor._tcp", domain: nil), using: .tcp)
+        self.browser = browser
+        browser.stateUpdateHandler = { [weak self] state in
+            if case .failed(let error) = state { self?.state = .failed(error.localizedDescription) }
+        }
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self = self, self.connection == nil, let endpoint = results.first?.endpoint else { return }
+            self.open(endpoint: endpoint)
+        }
+        browser.start(queue: sendQueue)
+    }
+
+    private func open(endpoint: NWEndpoint) {
+        serverEndpoint = endpoint
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        self.connection = connection
         connection.stateUpdateHandler = { [weak self] newState in
             guard let self = self else { return }
             switch newState {
@@ -68,11 +85,17 @@ class NetworkClient {
 
     func stop() {
         stopPingTimer()
-        connection.cancel()
+        browser?.cancel()
+        browser = nil
+        connection?.cancel()
+        connection = nil
+        videoConnection?.cancel()
+        videoConnection = nil
         state = .disconnected
     }
 
     private func receiveLoop() {
+        guard let connection = connection else { return }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
             if let data = data {
@@ -117,9 +140,45 @@ class NetworkClient {
             if let text = String(data: payload, encoding: .utf8) {
                 onStatus?(text)
             }
-        case .hello, .touch, .ping:
-            break // not expected from the server; ignore
+        case .hello:
+            guard let endpoint = serverEndpoint, StreamProtocol.parseHello(payload) != nil else { return }
+            let udp = NWConnection(to: endpoint, using: .udp)
+            videoConnection = udp
+            udp.stateUpdateHandler = { [weak self] state in
+                if case .ready = state { self?.receiveVideoLoop() }
+            }
+            udp.start(queue: sendQueue)
+            udp.send(content: Data([0x54, 0x4D, 0x52, 0x45, 0x47, 0x31]), completion: .contentProcessed { _ in })
+        case .touch, .ping:
+            break
         }
+    }
+
+    private func receiveVideoLoop() {
+        guard let udp = videoConnection else { return }
+        udp.receiveMessage { [weak self] data, _, _, error in
+            guard let self = self else { return }
+            if let data = data { self.handleVideoDatagram(data) }
+            if error == nil { self.receiveVideoLoop() }
+        }
+    }
+
+    private func handleVideoDatagram(_ data: Data) {
+        guard let packet = StreamProtocol.parseVideoDatagram(data) else { return }
+        var entry = videoParts[packet.frame] ?? (packet.total, packet.keyframe, packet.width, packet.height, [:])
+        guard entry.total == packet.total else { return }
+        entry.parts[packet.index] = packet.bytes
+        videoParts[packet.frame] = entry
+        guard entry.parts.count == Int(entry.total) else {
+            let oldest = packet.frame > 2 ? packet.frame - 2 : 0
+            videoParts = videoParts.filter { $0.key >= oldest }
+            return
+        }
+        var accessUnit = Data()
+        for index in 0..<entry.total { guard let part = entry.parts[index] else { return }; accessUnit.append(part) }
+        videoParts.removeValue(forKey: packet.frame)
+        onVideoMeta?(entry.width, entry.height)
+        decoder.decode(accessUnit: accessUnit)
     }
 
     /// Serializes and sends a batch of touches.
@@ -128,7 +187,7 @@ class NetworkClient {
         NSLog("[TouchMonitor] sendTouches events=\(events.count) state=\(stateDesc)")
         if case .connected = state, !events.isEmpty {
             let message = StreamProtocol.makeTouchMessage(events: events)
-            connection.send(content: message, completion: .contentProcessed { _ in })
+            connection?.send(content: message, completion: .contentProcessed { _ in })
             NSLog("[TouchMonitor] sendTouches -> sent \(message.count) bytes")
         } else {
             NSLog("[TouchMonitor] sendTouches -> SKIPPED (not connected or empty)")
@@ -149,7 +208,7 @@ class NetworkClient {
     func sendPing() {
         guard case .connected = state else { return }
         let ping = StreamProtocol.frame(type: .ping, payload: Data())
-        connection.send(content: ping, completion: .contentProcessed { _ in })
+        connection?.send(content: ping, completion: .contentProcessed { _ in })
     }
 
     private func startPingTimer() {

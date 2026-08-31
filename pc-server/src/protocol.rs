@@ -20,8 +20,15 @@ pub const MSG_INFO: u8 = 0x02;
 pub const MSG_TOUCH: u8 = 0x03;
 /// Client -> server: keep-alive / ping.
 pub const MSG_PING: u8 = 0x04;
+/// TCP control handshake: payload is `[u16 udp_port]`.
 
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
+
+pub fn make_hello(udp_port: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_message(&mut out, MSG_HELLO, &udp_port.to_le_bytes());
+    out
+}
 
 /// Writes a single framed message into `out`:
 /// `[u32 len][u8 type][payload]` where `len = payload.len() + 1`.
