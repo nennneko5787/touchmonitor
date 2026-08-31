@@ -184,10 +184,12 @@ impl MonitorCapture {
                             return Ok(());
                         }
                     };
+                    if callback_number <= 3 { println!("WGC extracting frame #{callback_number}"); }
                     let result = extract_frame(&handler_dev, &handler_ctx, &frame);
                     let _ = frame.Close();
                     match result {
                         Ok(captured) => {
+                            if callback_number <= 3 { println!("WGC extracted frame #{callback_number}: {}x{}", captured.width, captured.height); }
                             // Drop frames if the consumer is backed up.
                             let _ = tx.try_send(captured);
                         }
@@ -312,6 +314,9 @@ fn extract_frame(
     let staging = staging.ok_or_else(|| "no staging texture".to_string())?;
 
     unsafe { context.CopyResource(&staging, &texture) };
+    // Submit the copy before synchronously mapping the staging resource. On
+    // some WGC/D3D11 driver combinations Map can otherwise wait indefinitely.
+    unsafe { context.Flush() };
 
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
