@@ -14,7 +14,6 @@ unsafe extern "system" fn registration_complete(status: u32, _context: *const c_
 pub struct Advertisement {
     request: DNS_SERVICE_REGISTER_REQUEST,
     instance_name: Vec<u16>,
-    host_name: Vec<u16>,
     instance: Box<DNS_SERVICE_INSTANCE>,
     ip4: Box<u32>,
     cancel: DNS_SERVICE_CANCEL,
@@ -22,12 +21,6 @@ pub struct Advertisement {
 
 pub fn advertise(port: u16) -> Result<Advertisement, Box<dyn std::error::Error>> {
     let instance_name: Vec<u16> = "TouchMonitor._touchmonitor._tcp.local.\0".encode_utf16().collect();
-    let computer_name = std::env::var("COMPUTERNAME")
-        .ok()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "touchmonitor".to_owned());
-    let host_name_text = format!("{computer_name}.local.");
-    let host_name: Vec<u16> = format!("{host_name_text}\0").encode_utf16().collect();
     let ip = local_ipv4().unwrap_or(Ipv4Addr::new(127, 0, 0, 1));
     // IP4_ADDRESS is stored in network byte order. `from_ne_bytes` keeps the
     // octets in the same order in memory on Windows, whereas `from_be_bytes`
@@ -35,7 +28,10 @@ pub fn advertise(port: u16) -> Result<Advertisement, Box<dyn std::error::Error>>
     let mut ip4 = Box::new(u32::from_ne_bytes(ip.octets()));
     let instance = DNS_SERVICE_INSTANCE {
         pszInstanceName: PWSTR(instance_name.as_ptr() as *mut u16),
-        pszHostName: PWSTR(host_name.as_ptr() as *mut u16),
+        // NULL makes Bonjour use the system's already-advertised host name.
+        // Supplying a custom *.local name creates an SRV record without an A
+        // record in Windows' DNS-SD implementation.
+        pszHostName: PWSTR::null(),
         ip4Address: &mut *ip4,
         ip6Address: ptr::null_mut(),
         wPort: port,
@@ -61,8 +57,8 @@ pub fn advertise(port: u16) -> Result<Advertisement, Box<dyn std::error::Error>>
     if status != 9506u32 { // DNS_REQUEST_PENDING
         return Err(format!("DnsServiceRegister failed: {status}").into());
     }
-    println!("Bonjour advertisement: TouchMonitor._touchmonitor._tcp.local. -> {host_name_text} ({ip}:{port})");
-    Ok(Advertisement { request, instance_name, host_name, instance: boxed_instance, ip4, cancel })
+    println!("Bonjour advertisement: TouchMonitor._touchmonitor._tcp.local. -> system host ({ip}:{port})");
+    Ok(Advertisement { request, instance_name, instance: boxed_instance, ip4, cancel })
 }
 
 fn local_ipv4() -> Option<Ipv4Addr> {
