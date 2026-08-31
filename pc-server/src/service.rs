@@ -24,7 +24,10 @@ pub fn advertise(port: u16) -> Result<Advertisement, Box<dyn std::error::Error>>
     let instance_name: Vec<u16> = "TouchMonitor._touchmonitor._tcp.local.\0".encode_utf16().collect();
     let host_name: Vec<u16> = "touchmonitor.local.\0".encode_utf16().collect();
     let ip = local_ipv4().unwrap_or(Ipv4Addr::new(127, 0, 0, 1));
-    let mut ip4 = Box::new(u32::from_be_bytes(ip.octets()));
+    // IP4_ADDRESS is stored in network byte order. `from_ne_bytes` keeps the
+    // octets in the same order in memory on Windows, whereas `from_be_bytes`
+    // would make the DNS-SD A record point at the reversed address.
+    let mut ip4 = Box::new(u32::from_ne_bytes(ip.octets()));
     let instance = DNS_SERVICE_INSTANCE {
         pszInstanceName: PWSTR(instance_name.as_ptr() as *mut u16),
         pszHostName: PWSTR(host_name.as_ptr() as *mut u16),
