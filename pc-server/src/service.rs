@@ -10,14 +10,24 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 type ServiceRef = *mut c_void;
 type RecordRef = *mut c_void;
 type DnsError = i32;
-type RegisterFn = unsafe extern "system" fn(*mut ServiceRef, u32, u32, *const c_char, *const c_char, *const c_char, *const c_char, u16, u16, *const c_void, Option<unsafe extern "system" fn()>, *mut c_void) -> DnsError;
+type RegisterCallback = unsafe extern "system" fn(ServiceRef, u32, DnsError, *const c_char, *const c_char, *const c_char, *mut c_void);
+type RecordCallback = unsafe extern "system" fn(ServiceRef, RecordRef, u32, DnsError, *mut c_void);
+type RegisterFn = unsafe extern "system" fn(*mut ServiceRef, u32, u32, *const c_char, *const c_char, *const c_char, *const c_char, u16, u16, *const c_void, Option<RegisterCallback>, *mut c_void) -> DnsError;
 type CreateConnectionFn = unsafe extern "system" fn(*mut ServiceRef) -> DnsError;
-type RegisterRecordFn = unsafe extern "system" fn(ServiceRef, *mut RecordRef, u32, u32, *const c_char, u16, u16, u16, *const c_void, u32, Option<unsafe extern "system" fn()>, *mut c_void) -> DnsError;
+type RegisterRecordFn = unsafe extern "system" fn(ServiceRef, *mut RecordRef, u32, u32, *const c_char, u16, u16, u16, *const c_void, u32, Option<RecordCallback>, *mut c_void) -> DnsError;
 type DeallocateFn = unsafe extern "system" fn(ServiceRef);
 
 const NO_ERROR: DnsError = 0;
 const CLASS_IN: u16 = 1;
 const TYPE_A: u16 = 1;
+
+unsafe extern "system" fn register_callback(_: ServiceRef, _: u32, error: DnsError, _: *const c_char, _: *const c_char, _: *const c_char, _: *mut c_void) {
+    if error != NO_ERROR { eprintln!("Bonjour service registration callback failed: {error}"); }
+}
+
+unsafe extern "system" fn record_callback(_: ServiceRef, _: RecordRef, _: u32, error: DnsError, _: *mut c_void) {
+    if error != NO_ERROR { eprintln!("Bonjour A record callback failed: {error}"); }
+}
 
 pub struct Advertisement {
     module: HMODULE,
@@ -56,14 +66,14 @@ unsafe fn register(module: HMODULE, port: u16) -> Result<(ServiceRef, ServiceRef
     let domain = b"local\0";
     let host_bytes = host.as_bytes();
     let mut service: ServiceRef = std::ptr::null_mut();
-    let error = register(&mut service, 0, 0, name.as_ptr() as _, regtype.as_ptr() as _, domain.as_ptr() as _, host_bytes.as_ptr() as _, port.to_be(), 0, std::ptr::null(), None, std::ptr::null_mut());
+    let error = register(&mut service, 0, 0, name.as_ptr() as _, regtype.as_ptr() as _, domain.as_ptr() as _, host_bytes.as_ptr() as _, port.to_be(), 0, std::ptr::null(), Some(register_callback), std::ptr::null_mut());
     if error != NO_ERROR { return Err(format!("DNSServiceRegister failed: {error}")); }
     let mut records: ServiceRef = std::ptr::null_mut();
     let error = create_connection(&mut records);
     if error != NO_ERROR { deallocate(service); return Err(format!("DNSServiceCreateConnection failed: {error}")); }
     let address = ip.octets();
     let mut record: RecordRef = std::ptr::null_mut();
-    let error = register_record(records, &mut record, 0, 0, host_bytes.as_ptr() as _, TYPE_A, CLASS_IN, address.len() as u16, address.as_ptr() as _, 120, None, std::ptr::null_mut());
+    let error = register_record(records, &mut record, 0, 0, host_bytes.as_ptr() as _, TYPE_A, CLASS_IN, address.len() as u16, address.as_ptr() as _, 120, Some(record_callback), std::ptr::null_mut());
     if error != NO_ERROR {
         deallocate(records);
         deallocate(service);
