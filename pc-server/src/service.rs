@@ -60,7 +60,8 @@ unsafe fn register(module: HMODULE, port: u16) -> Result<(ServiceRef, ServiceRef
     let deallocate: DeallocateFn = transmute(symbol(s!("DNSServiceRefDeallocate"))?);
     let ip = local_ipv4().ok_or("could not determine the local IPv4 address")?;
     let computer_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "touchmonitor".to_owned());
-    let host = format!("{computer_name}.local.");
+    // All dnssd.dll names are NUL-terminated UTF-8 C strings.
+    let host = format!("{computer_name}.local.\0");
     let name = b"TouchMonitor\0";
     let regtype = b"_touchmonitor._tcp\0";
     let domain = b"local\0";
